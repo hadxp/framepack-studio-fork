@@ -1,0 +1,7 @@
+opencv-python
+insightface
+onnxruntime-gpu
+facexlib
+av
+lpips
+tqdm

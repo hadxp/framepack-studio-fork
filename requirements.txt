@@ -39,3 +39,6 @@ colorlog
 # mmaudio
 moviepy
 -r ./modules/MMAudio/requirements.txt
+
+# VideoFaceSwapper
+-r ./modules/VideoFaceSwapper/requirements.txt
