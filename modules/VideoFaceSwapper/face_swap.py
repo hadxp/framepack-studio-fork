@@ -35,19 +35,16 @@ def perform_face_swap(
             model_dir = model_info["dir"]
             model_name = model_info["filename"]  # with extension
             full_model_path = os.path.join(model_dir, model_name)
-            if os.path.exists(full_model_path):
-                swap_model_path = full_model_path
+            swap_model_path = full_model_path
         if model_entry_name == "faceanalyser":
             model_dir = model_info["buffalo_l"]["dir"]
-            if os.path.exists(model_dir):
-                faceanalyser_model_dir = model_dir
+            faceanalyser_model_dir = model_dir
         if model_entry_name == "codeformer":
             model_dir = model_info["dir"]
             model_name = model_info["filename"]  # with extension
             full_model_path = os.path.join(model_dir, model_name)
             #print(full_model_path + " " + str(os.path.exists(full_model_path)))
-            if os.path.exists(full_model_path):
-                codeformer_path = full_model_path
+            codeformer_path = full_model_path
 
     # make sure the ckpts downloaded successfully
     check_ckpts()
