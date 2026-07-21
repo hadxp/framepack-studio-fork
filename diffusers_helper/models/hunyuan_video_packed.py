@@ -36,8 +36,10 @@ if torch.backends.cuda.cudnn_sdp_enabled():
 print("Currently enabled native sdp backends:", enabled_backends)
 
 xformers_attn_func = None
-flash_attn_varlen_func = None
-flash_attn_func = None
+flash2_attn_varlen_func = None
+flash2_attn_func = None
+flash4_attn_varlen_func = None
+flash4_attn_func = None
 sageattn_varlen = None
 sageattn = None
 
@@ -49,7 +51,15 @@ except:
 
 try:
     # raise NotImplementedError
-    from flash_attn import flash_attn_varlen_func, flash_attn_func
+    from flash_attn import (flash_attn_varlen_func as flash2_attn_varlen_func,
+                            flash_attn_func as flash2_attn_func)
+except:
+    pass
+
+try:
+    # raise NotImplementedError
+    from flash_attn.cute import (flash_attn_varlen_func as flash4_attn_varlen_func,
+                            flash_attn_func as flash4_attn_func)
 except:
     pass
 
@@ -59,40 +69,57 @@ try:
 except:
     pass
 
-# --- Attention Summary ---
 print("\n--- Attention Configuration ---")
 has_sage = sageattn is not None and sageattn_varlen is not None
-has_flash = flash_attn_func is not None and flash_attn_varlen_func is not None
+has_flash2 = flash2_attn_func is not None and flash2_attn_varlen_func is not None
+has_flash4 = flash4_attn_func is not None and flash4_attn_varlen_func is not None
 has_xformers = xformers_attn_func is not None
 
-if has_sage:
-    print("✅  Using SAGE Attention (highest performance).")
-    ignored = []
-    if has_flash:
-        ignored.append("Flash Attention")
-    if has_xformers:
-        ignored.append("xFormers")
+# Priority order, best to worst
+PRIORITY = [
+    ("Flash Attention-4", has_flash4),
+    ("SAGE Attention", has_sage),
+    ("Flash Attention-2", has_flash2),
+    ("xFormers", has_xformers),
+]
+
+def better_options(current_name):
+    """Return names of not-installed backends ranked above current_name."""
+    idx = next(i for i, (name, _) in enumerate(PRIORITY) if name == current_name)
+    return [name for name, installed in PRIORITY[:idx] if not installed]
+
+def worse_installed(current_name):
+    """Return names of installed backends ranked below current_name (being ignored)."""
+    idx = next(i for i, (name, _) in enumerate(PRIORITY) if name == current_name)
+    return [name for name, installed in PRIORITY[idx + 1:] if installed]
+
+if has_flash4:
+    print("✅  Using Flash Attention-4 (highest performance).")
+    ignored = worse_installed("Flash Attention-4")
     if ignored:
-        print(
-            f"   - Ignoring other installed attention libraries: {', '.join(ignored)}"
-        )
-elif has_flash:
+        print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
+elif has_sage:
+    print("✅  Using SAGE Attention (high performance).")
+    for opt in better_options("SAGE Attention"):
+        print(f"   - Consider installing {opt} for even higher performance.")
+    ignored = worse_installed("SAGE Attention")
+    if ignored:
+        print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
+elif has_flash2:
     print("✅  Using Flash Attention (high performance).")
-    if has_xformers:
-        print("   - Consider installing SAGE Attention for highest performance.")
-        print("   - Ignoring other installed attention library: xFormers")
+    for opt in better_options("Flash Attention-2"):
+        print(f"   - Consider installing {opt} for higher performance.")
+    ignored = worse_installed("Flash Attention-2")
+    if ignored:
+        print(f"   - Ignoring other installed attention library: {', '.join(ignored)}")
 elif has_xformers:
     print("✅  Using xFormers.")
-    print("   - Consider installing SAGE Attention for highest performance.")
-    print("   - or Consider installing Flash Attention for high performance.")
+    for opt in better_options("xFormers"):
+        print(f"   - Consider installing {opt} for higher performance.")
 else:
-    print(
-        "⚠️  No attention library found. Using native PyTorch Scaled Dot Product Attention."
-    )
+    print("⚠️  No attention library found. Using native PyTorch Scaled Dot Product Attention.")
     print("   - For better performance, consider installing one of:")
-    print(
-        "     SAGE Attention (highest performance), Flash Attention (high performance), or xFormers."
-    )
+    print(f"     {', '.join(name for name, _ in PRIORITY)}.")
 print("-------------------------------\n")
 
 
@@ -150,12 +177,16 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         and max_seqlen_q is None
         and max_seqlen_kv is None
     ):
+        if flash4_attn_func is not None:
+            out, lse = flash4_attn_func(q, k, v)
+            return out
+
         if sageattn is not None:
             x = sageattn(q, k, v, tensor_layout="NHD")
             return x
 
-        if flash_attn_func is not None:
-            x = flash_attn_func(q, k, v)
+        if flash2_attn_func is not None:
+            x = flash2_attn_func(q, k, v)
             return x
 
         if xformers_attn_func is not None:
@@ -175,9 +206,17 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         x = sageattn_varlen(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
         )
-    elif flash_attn_varlen_func is not None:
-        x = flash_attn_varlen_func(
+    elif flash2_attn_varlen_func is not None:
+        x = flash2_attn_varlen_func(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
+        )
+    elif flash4_attn_varlen_func is not None:
+        x, lse = flash4_attn_varlen_func(
+            q, k, v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_kv,
         )
     else:
         raise NotImplementedError("No Attn Installed!")
