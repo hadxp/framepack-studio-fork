@@ -40,8 +40,9 @@ flash2_attn_varlen_func = None
 flash2_attn_func = None
 flash4_attn_varlen_func = None
 flash4_attn_func = None
-sageattn_varlen = None
-sageattn = None
+sageattn1_varlen = None
+sageattn1 = None
+sageattn3 = None
 
 try:
     # raise NotImplementedError
@@ -65,20 +66,38 @@ except:
 
 try:
     # raise NotImplementedError
-    from sageattention import sageattn_varlen, sageattn
+    from sageattention import (sageattn_varlen as sageattn1_varlen,
+                               sageattn as sageattn1)
 except:
     pass
 
+try:
+    from sageattn3 import sageattn3_blackwell as sageattn3
+except:
+    pass
+
+major, minor = torch.cuda.get_device_capability()
+arch = f"sm_{major}{minor}"
+if major == 10:
+    s = "Datacenter Blackwell"
+elif major == 12:
+    s = "Workstation/Consumer Blackwell"
+else:
+    s = "Other architecture (Hopper, Ada, Ampere, etc.)"
+print(f"Detected CUDA Architecture: {arch} ({s})")
+
 print("\n--- Attention Configuration ---")
-has_sage = sageattn is not None and sageattn_varlen is not None
+has_sage1 = sageattn1 is not None and sageattn1_varlen is not None
+has_sage3 = sageattn3 is not None
 has_flash2 = flash2_attn_func is not None and flash2_attn_varlen_func is not None
 has_flash4 = flash4_attn_func is not None and flash4_attn_varlen_func is not None
 has_xformers = xformers_attn_func is not None
 
 # Priority order, best to worst
 PRIORITY = [
+    ("SAGE Attention-3", has_sage3),
     ("Flash Attention-4", has_flash4),
-    ("SAGE Attention", has_sage),
+    ("SAGE Attention-1", has_sage1),
     ("Flash Attention-2", has_flash2),
     ("xFormers", has_xformers),
 ]
@@ -93,16 +112,25 @@ def worse_installed(current_name):
     idx = next(i for i, (name, _) in enumerate(PRIORITY) if name == current_name)
     return [name for name, installed in PRIORITY[idx + 1:] if installed]
 
-if has_flash4:
+if has_sage3 and (major == 10 or major == 12): # can only be used on blackwell cards
+    print("✅  Using SAGE Attention-3 (highest performance).")
+    for opt in better_options("Flash Attention-4"):
+        print(f"   - Consider installing {opt} for even higher performance.")
+    ignored = worse_installed("SAGE Attention-3")
+    if ignored:
+        print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
+elif has_flash4 and major == 10: # can only be used on datacenter blackwell cards
     print("✅  Using Flash Attention-4 (highest performance).")
+    for opt in better_options("Flash Attention-4"):
+        print(f"   - Consider installing {opt} for even higher performance.")
     ignored = worse_installed("Flash Attention-4")
     if ignored:
         print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
-elif has_sage:
+elif has_sage1:
     print("✅  Using SAGE Attention (high performance).")
-    for opt in better_options("SAGE Attention"):
+    for opt in better_options("SAGE Attention-1"):
         print(f"   - Consider installing {opt} for even higher performance.")
-    ignored = worse_installed("SAGE Attention")
+    ignored = worse_installed("SAGE Attention-1")
     if ignored:
         print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
 elif has_flash2:
@@ -177,12 +205,30 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         and max_seqlen_q is None
         and max_seqlen_kv is None
     ):
+        if sageattn3 is not None:
+            # Tensor layout is: HND, not NHD
+
+            # NHD → HND
+            q_c = q.transpose(1, 2).contiguous()
+            k_c = k.transpose(1, 2).contiguous()
+            v_c = v.transpose(1, 2).contiguous()
+
+            x_c = sageattn3(
+                q_c, k_c, v_c,
+                is_causal=False
+            )
+
+            # HND → NHD
+            x = x_c.transpose(1, 2).contiguous()
+
+            return x
+
         if flash4_attn_func is not None:
             out, lse = flash4_attn_func(q, k, v)
             return out
 
-        if sageattn is not None:
-            x = sageattn(q, k, v, tensor_layout="NHD")
+        if sageattn1 is not None:
+            x = sageattn1(q, k, v, tensor_layout="NHD")
             return x
 
         if flash2_attn_func is not None:
@@ -203,7 +249,7 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
     k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])
     v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])
     if sageattn_varlen is not None:
-        x = sageattn_varlen(
+        x = sageattn1_varlen(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
         )
     elif flash2_attn_varlen_func is not None:
