@@ -1302,7 +1302,7 @@ def worker(
                         ),
                     )
                 )
-                
+
             move_model_to_device_with_memory_preservation(
                 studio_module.current_generator.transformer,
                 target_device=gpu,
