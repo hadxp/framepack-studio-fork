@@ -237,6 +237,7 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
 
             # HND → NHD
             x = x_c.transpose(1, 2).contiguous()
+            return x
 
         bias = _START_ATTENTION["bias"]
         if bias is not None and bias.shape[-1] == k.shape[1]:
@@ -245,8 +246,8 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
                 attn_mask=bias.to(q.dtype),
             ).transpose(1, 2)
 
-        if sageattn is not None:
-            x = sageattn(q, k, v, tensor_layout="NHD")
+        if sageattn1 is not None:
+            x = sageattn1(q, k, v, tensor_layout="NHD")
             return x
 
         if flash4_attn_func is not None:
@@ -274,7 +275,7 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
     q = q.view(q.shape[0] * q.shape[1], *q.shape[2:])
     k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])
     v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])
-    if sageattn_varlen is not None:
+    if sageattn1_varlen is not None:
         x = sageattn1_varlen(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
         )
