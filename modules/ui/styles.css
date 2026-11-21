@@ -235,6 +235,21 @@
   }
 }
 
+@media (max-width: 768px) {
+    .toolbar-title {
+        font-size: 1.1rem;
+        max-width: 150px;
+    }
+    #fixed-toolbar {
+        display: none !important; /* Hide entire toolbar on small screens */
+        padding: 3px 6px;
+        gap: 4px;
+    }
+    .toolbar-text {
+        font-size: 0.75rem;
+    }
+}
+
 /* ------------------------------------------------------------ shared bits */
 
 .section-title h3,
