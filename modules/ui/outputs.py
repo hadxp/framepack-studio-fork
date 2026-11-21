@@ -1,19 +1,32 @@
-from typing import List, Any
-from pathlib import Path
-import gradio as gr
 import os
 import json
 import logging
-
+import numpy as np
 import sys as _sys
+import gradio as gr
+import torch
+from PIL import Image
+from pathlib import Path
+from typing import List
 
 _mmaudio_root = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "MMAudio")
 )
-if _mmaudio_root not in _sys.path:
+if _mmaudio_root not in _sys.path and os.path.exists(_mmaudio_root):
     _sys.path.insert(0, _mmaudio_root)
 
+_video_face_swapper_root = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "VideoFaceSwapper")
+)
+if _video_face_swapper_root not in _sys.path and os.path.exists(
+    _video_face_swapper_root
+):
+    _sys.path.insert(0, _video_face_swapper_root)
+
 from mmaudio.eval_utils import all_model_cfg  # noqa: E402
+
+from modules.VideoFaceSwapper.VideoFrameExtractor import VideoFrameExtractor  # noqa: E402
+from modules.VideoFaceSwapper.face_swap import perform_face_swap  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +78,19 @@ def create_outputs_ui(settings):
 
                     gen_audio_btn = gr.Button("Generate audio")
                 audio_delete_btn = gr.Button("🗑️ Delete")
+
+            video_face_swapper_acc = gr.Accordion(
+                label="Face swapper", open=False, visible=False
+            )
+            with video_face_swapper_acc:
+                source_face_indices_txt = gr.Textbox(
+                    label="Source face indices", value="-1"
+                )
+                target_face_indices_txt = gr.Textbox(
+                    label="Target face indices", value="-1"
+                )
+                source_face_image_img = gr.Image(label="Source face image", type="pil")
+                video_face_swapper_btn = gr.Button("Swap Faces")
         with gr.Column(scale=5):
             video_out = gr.Video(sources=[], autoplay=True, loop=True, visible=False)
         with gr.Column(scale=1):
@@ -92,6 +118,11 @@ def create_outputs_ui(settings):
         "audio_model_dropdown": audio_model_dropdown,
         "audio_prompt_chkbox": audio_prompt_chkbox,
         "audio_prompt_neg_chkbox": audio_prompt_neg_chkbox,
+        "video_face_swapper_acc": video_face_swapper_acc,
+        "source_face_indices_txt": source_face_indices_txt,
+        "target_face_indices_txt": target_face_indices_txt,
+        "video_face_swapper_btn": video_face_swapper_btn,
+        "source_face_image_img": source_face_image_img,
     }
 
 
@@ -254,6 +285,7 @@ def connect_outputs_events(
         gr.State,
         gr.Accordion,
         gr.Checkbox,
+        gr.Accordion,
     ]:
         if evt.index is None or not gallery_items or evt.index >= len(gallery_items):
             return (
@@ -265,6 +297,7 @@ def connect_outputs_events(
                 None,  # selected_prefix_state
                 gr.update(visible=False),  # gen_audio_acc
                 gr.update(visible=False),  # overwrite_audio_chkbox
+                gr.update(visible=False),  # video_face_swapper_acc
             )
 
         prefix = gallery_items[evt.index][1]
@@ -285,6 +318,7 @@ def connect_outputs_events(
             prefix,  # selected_prefix_state
             gr.update(visible=bool(original_video_path)),  # gen_audio_acc
             overwrite_audio_checkbox_visibility,  # overwrite_audio_chkbox
+            gr.update(visible=bool(original_video_path)),  # video_face_swapper_acc
         )
 
     def send_to_toolbox(selected_video_path) -> tuple[gr.Tab, gr.Tabs]:
@@ -298,7 +332,7 @@ def connect_outputs_events(
             logging.error(f"Video file and metadata for prefix {prefix}, not found")
         return Path(original_video_path), metadata
 
-    def get_audio(selected_prefix: str) -> tuple[Path, Any, int]:
+    def get_audio(selected_prefix: str) -> tuple[Path, torch.Tensor, int]:
         video_file_path = get_video_file_and_metadata(selected_prefix)[0]
 
         from moviepy import VideoFileClip
@@ -467,6 +501,55 @@ def connect_outputs_events(
             logger.error(f"Error checking audio: {e}")
             return (gr.update(visible=False),)
 
+    def swap_faces(
+        selected_prefix: str,
+        source_face_image_img: gr.Image,
+        source_face_indices_txt: gr.Textbox,
+        target_face_indices_txt: gr.Textbox,
+    ):
+        if not selected_prefix:
+            return
+
+        video_file, metadata = get_video_file_and_metadata(selected_prefix)
+
+        _video_face_swapper_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "VideoFaceSwapper")
+        )
+        if _video_face_swapper_root not in _sys.path:
+            _sys.path.insert(0, _video_face_swapper_root)
+
+        source_image: Image.Image = source_face_image_img
+        source_image_face_indexes: str = source_face_indices_txt
+        target_image_face_indexes: str = target_face_indices_txt
+
+        if source_image is None:
+            raise Exception("No source image specified")
+        if source_image_face_indexes == "" or source_image_face_indexes == " ":
+            raise Exception("No source face indices specified")
+        if target_image_face_indexes == "" or target_image_face_indexes == " ":
+            raise Exception("No target face indices specified")
+
+        vfe = VideoFrameExtractor(video_file)
+
+        frames, videoinfo = vfe.get_video()
+
+        swapped_frames: List[np.ndarray] = perform_face_swap(
+            frames, source_image, source_image_face_indexes, target_image_face_indexes
+        )
+        if len(frames) == len(swapped_frames):
+            print("Successfully performed face swap on all frames in the video")
+
+            vfe.save_video(
+                frames=swapped_frames,
+                info=videoinfo,
+                output_path=videoinfo.file_path,
+                codec=videoinfo.codec,
+            )
+
+            print("Video saved")
+        else:
+            print("Unsuccessfully performed face swap on all frames in the video")
+
     o["refresh_gallery_button"].click(
         fn=refresh_gallery, inputs=[], outputs=[o["gallery_items_state"], o["thumbs"]]
     )
@@ -482,6 +565,7 @@ def connect_outputs_events(
             o["selected_prefix_state"],
             o["gen_audio_acc"],
             o["overwrite_audio_chkbox"],
+            o["video_face_swapper_acc"],
         ],
     )
     o["send_to_toolbox_btn"].click(
@@ -531,5 +615,15 @@ def connect_outputs_events(
         outputs=[
             o["overwrite_audio_chkbox"],
         ],
+    )
+    o["video_face_swapper_btn"].click(
+        fn=swap_faces,
+        inputs=[
+            o["selected_prefix_state"],
+            o["source_face_image_img"],
+            o["source_face_indices_txt"],
+            o["target_face_indices_txt"],
+        ],
+        outputs=[],
     )
     return get_gallery_items
