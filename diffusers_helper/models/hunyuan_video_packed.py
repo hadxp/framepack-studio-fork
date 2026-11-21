@@ -36,10 +36,13 @@ if torch.backends.cuda.cudnn_sdp_enabled():
 print("Currently enabled native sdp backends:", enabled_backends)
 
 xformers_attn_func = None
-flash_attn_varlen_func = None
-flash_attn_func = None
-sageattn_varlen = None
-sageattn = None
+flash2_attn_varlen_func = None
+flash2_attn_func = None
+flash4_attn_varlen_func = None
+flash4_attn_func = None
+sageattn1_varlen = None
+sageattn1 = None
+sageattn3 = None
 
 try:
     # raise NotImplementedError
@@ -49,50 +52,102 @@ except:
 
 try:
     # raise NotImplementedError
-    from flash_attn import flash_attn_varlen_func, flash_attn_func
+    from flash_attn import (flash_attn_varlen_func as flash2_attn_varlen_func,
+                            flash_attn_func as flash2_attn_func)
 except:
     pass
 
 try:
     # raise NotImplementedError
-    from sageattention import sageattn_varlen, sageattn
+    from flash_attn.cute import (flash_attn_varlen_func as flash4_attn_varlen_func,
+                            flash_attn_func as flash4_attn_func)
 except:
     pass
 
-# --- Attention Summary ---
+try:
+    # raise NotImplementedError
+    from sageattention import (sageattn_varlen as sageattn1_varlen,
+                               sageattn as sageattn1)
+except:
+    pass
+
+try:
+    from sageattn3 import sageattn3_blackwell as sageattn3
+except:
+    pass
+
+major, minor = torch.cuda.get_device_capability()
+arch = f"sm_{major}{minor}"
+if major == 10:
+    s = "Datacenter Blackwell"
+elif major == 12:
+    s = "Workstation/Consumer Blackwell"
+else:
+    s = "Other architecture (Hopper, Ada, Ampere, etc.)"
+print(f"Detected CUDA Architecture: {arch} ({s})")
+
 print("\n--- Attention Configuration ---")
-has_sage = sageattn is not None and sageattn_varlen is not None
-has_flash = flash_attn_func is not None and flash_attn_varlen_func is not None
+has_sage1 = sageattn1 is not None and sageattn1_varlen is not None
+has_sage3 = sageattn3 is not None
+has_flash2 = flash2_attn_func is not None and flash2_attn_varlen_func is not None
+has_flash4 = flash4_attn_func is not None and flash4_attn_varlen_func is not None
 has_xformers = xformers_attn_func is not None
 
-if has_sage:
-    print("✅  Using SAGE Attention (highest performance).")
-    ignored = []
-    if has_flash:
-        ignored.append("Flash Attention")
-    if has_xformers:
-        ignored.append("xFormers")
+# Priority order, best to worst
+PRIORITY = [
+    ("SAGE Attention-3", has_sage3),
+    ("Flash Attention-4", has_flash4),
+    ("SAGE Attention-1", has_sage1),
+    ("Flash Attention-2", has_flash2),
+    ("xFormers", has_xformers),
+]
+
+def better_options(current_name):
+    """Return names of not-installed backends ranked above current_name."""
+    idx = next(i for i, (name, _) in enumerate(PRIORITY) if name == current_name)
+    return [name for name, installed in PRIORITY[:idx] if not installed]
+
+def worse_installed(current_name):
+    """Return names of installed backends ranked below current_name (being ignored)."""
+    idx = next(i for i, (name, _) in enumerate(PRIORITY) if name == current_name)
+    return [name for name, installed in PRIORITY[idx + 1:] if installed]
+
+if has_sage3 and (major == 10 or major == 12): # can only be used on blackwell cards
+    print("✅  Using SAGE Attention-3 (highest performance).")
+    for opt in better_options("Flash Attention-4"):
+        print(f"   - Consider installing {opt} for even higher performance.")
+    ignored = worse_installed("SAGE Attention-3")
     if ignored:
-        print(
-            f"   - Ignoring other installed attention libraries: {', '.join(ignored)}"
-        )
-elif has_flash:
+        print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
+elif has_flash4 and major == 10: # can only be used on datacenter blackwell cards
+    print("✅  Using Flash Attention-4 (highest performance).")
+    for opt in better_options("Flash Attention-4"):
+        print(f"   - Consider installing {opt} for even higher performance.")
+    ignored = worse_installed("Flash Attention-4")
+    if ignored:
+        print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
+elif has_sage1:
+    print("✅  Using SAGE Attention (high performance).")
+    for opt in better_options("SAGE Attention-1"):
+        print(f"   - Consider installing {opt} for even higher performance.")
+    ignored = worse_installed("SAGE Attention-1")
+    if ignored:
+        print(f"   - Ignoring other installed attention libraries: {', '.join(ignored)}")
+elif has_flash2:
     print("✅  Using Flash Attention (high performance).")
-    if has_xformers:
-        print("   - Consider installing SAGE Attention for highest performance.")
-        print("   - Ignoring other installed attention library: xFormers")
+    for opt in better_options("Flash Attention-2"):
+        print(f"   - Consider installing {opt} for higher performance.")
+    ignored = worse_installed("Flash Attention-2")
+    if ignored:
+        print(f"   - Ignoring other installed attention library: {', '.join(ignored)}")
 elif has_xformers:
     print("✅  Using xFormers.")
-    print("   - Consider installing SAGE Attention for highest performance.")
-    print("   - or Consider installing Flash Attention for high performance.")
+    for opt in better_options("xFormers"):
+        print(f"   - Consider installing {opt} for higher performance.")
 else:
-    print(
-        "⚠️  No attention library found. Using native PyTorch Scaled Dot Product Attention."
-    )
+    print("⚠️  No attention library found. Using native PyTorch Scaled Dot Product Attention.")
     print("   - For better performance, consider installing one of:")
-    print(
-        "     SAGE Attention (highest performance), Flash Attention (high performance), or xFormers."
-    )
+    print(f"     {', '.join(name for name, _ in PRIORITY)}.")
 print("-------------------------------\n")
 
 
@@ -163,6 +218,22 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
         and max_seqlen_q is None
         and max_seqlen_kv is None
     ):
+        if sageattn3 is not None:
+            # Tensor layout is: HND, not NHD
+
+            # NHD → HND
+            q_c = q.transpose(1, 2).contiguous()
+            k_c = k.transpose(1, 2).contiguous()
+            v_c = v.transpose(1, 2).contiguous()
+
+            x_c = sageattn3(
+                q_c, k_c, v_c,
+                is_causal=False
+            )
+
+            # HND → NHD
+            x = x_c.transpose(1, 2).contiguous()
+
         bias = _START_ATTENTION["bias"]
         if bias is not None and bias.shape[-1] == k.shape[1]:
             return torch.nn.functional.scaled_dot_product_attention(
@@ -174,8 +245,16 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
             x = sageattn(q, k, v, tensor_layout="NHD")
             return x
 
-        if flash_attn_func is not None:
-            x = flash_attn_func(q, k, v)
+        if flash4_attn_func is not None:
+            out, lse = flash4_attn_func(q, k, v)
+            return out
+
+        if sageattn1 is not None:
+            x = sageattn1(q, k, v, tensor_layout="NHD")
+            return x
+
+        if flash2_attn_func is not None:
+            x = flash2_attn_func(q, k, v)
             return x
 
         if xformers_attn_func is not None:
@@ -192,12 +271,20 @@ def attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seq
     k = k.view(k.shape[0] * k.shape[1], *k.shape[2:])
     v = v.view(v.shape[0] * v.shape[1], *v.shape[2:])
     if sageattn_varlen is not None:
-        x = sageattn_varlen(
+        x = sageattn1_varlen(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
         )
-    elif flash_attn_varlen_func is not None:
-        x = flash_attn_varlen_func(
+    elif flash2_attn_varlen_func is not None:
+        x = flash2_attn_varlen_func(
             q, k, v, cu_seqlens_q, cu_seqlens_kv, max_seqlen_q, max_seqlen_kv
+        )
+    elif flash4_attn_varlen_func is not None:
+        x, lse = flash4_attn_varlen_func(
+            q, k, v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_kv,
         )
     else:
         raise NotImplementedError("No Attn Installed!")
@@ -1027,20 +1114,6 @@ class HunyuanVideoTransformer3DModelPacked(
             ]
         )
 
-    def begin_sampling(self, first_step=0, num_steps=None):
-        """
-        Called at the start of every sampling run (one section). first_step is the
-        step of the full schedule the run starts at (> 0 when img2img skips steps)
-        and num_steps how many steps it will actually run.
-        """
-        # TeaCache: always compute the first and last step this run executes
-        self.cnt = 0
-        self.accumulated_rel_l1_distance = 0
-        if num_steps is not None:
-            self.num_steps = num_steps
-        if self.magcache is not None:
-            self.magcache.start_section(first_step)
-
     def install_magcache(self, magcache: MagCache):
         self.magcache = magcache
 
@@ -1099,12 +1172,6 @@ class HunyuanVideoTransformer3DModelPacked(
 
             hidden_states = torch.cat([clean_latents, hidden_states], dim=1)
             rope_freqs = torch.cat([clean_latent_rope_freqs, rope_freqs], dim=1)
-            # The start frame is clean_latents' first frame: H * W tokens at the
-            # front of this block (the 2x/4x context is prepended below).
-            start_tokens = H * W
-        else:
-            start_tokens = 0
-        tokens_before_clean = hidden_states.shape[1]
 
         if clean_latents_2x is not None and clean_latent_2x_indices is not None:
             clean_latents_2x = clean_latents_2x.to(hidden_states)
@@ -1160,33 +1227,7 @@ class HunyuanVideoTransformer3DModelPacked(
             hidden_states = torch.cat([clean_latents_4x, hidden_states], dim=1)
             rope_freqs = torch.cat([clean_latent_4x_rope_freqs, rope_freqs], dim=1)
 
-        self._start_frame_span = (
-            hidden_states.shape[1] - tokens_before_clean,
-            start_tokens,
-        )
-
         return hidden_states, rope_freqs
-
-    def _start_attention_bias(self, hidden_states, encoder_hidden_states, image_tokens):
-        """
-        Per-key logit bias, shape (1, 1, 1, keys): log(weight) on the start
-        frame's latent tokens and the start image's SigLIP tokens, 0 elsewhere.
-        Keys are [packed video tokens, image tokens, text tokens].
-        """
-        weight = _START_ATTENTION["weight"]
-        if weight is None:
-            return None
-        start, count = getattr(self, "_start_frame_span", (0, 0))
-        video_len = hidden_states.shape[1]
-        bias = torch.zeros(
-            video_len + encoder_hidden_states.shape[1],
-            device=hidden_states.device,
-            dtype=torch.float32,
-        )
-        log_weight = float(np.log(max(weight, 1e-6)))
-        bias[start : start + count] = log_weight
-        bias[video_len : video_len + image_tokens] = log_weight
-        return bias.view(1, 1, 1, -1)
 
     def forward(
         self,
@@ -1258,9 +1299,6 @@ class HunyuanVideoTransformer3DModelPacked(
             encoder_attention_mask = torch.cat(
                 [extra_attention_mask, encoder_attention_mask], dim=1
             )
-            image_tokens = extra_encoder_hidden_states.shape[1]
-        else:
-            image_tokens = 0
 
         with torch.no_grad():
             if batch_size == 1:
@@ -1269,11 +1307,7 @@ class HunyuanVideoTransformer3DModelPacked(
                 text_len = encoder_attention_mask.sum().item()
                 encoder_hidden_states = encoder_hidden_states[:, :text_len]
                 attention_mask = None, None, None, None
-                _START_ATTENTION["bias"] = self._start_attention_bias(
-                    hidden_states, encoder_hidden_states, image_tokens
-                )
             else:
-                _START_ATTENTION["bias"] = None
                 img_seq_len = hidden_states.shape[1]
                 txt_seq_len = encoder_hidden_states.shape[1]
 
