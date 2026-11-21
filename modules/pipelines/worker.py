@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 logger.debug("Worker module loaded.")
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def get_cached_or_encode_prompt(
     prompt,
     text_encoder,
