@@ -154,22 +154,21 @@ def create_settings_ui(settings, get_latents_display_top, model_type_choices):
                 gr.Markdown(
                     """
                     ---
-                    Quantization Format is used to reduce the memory footprint of the model weights. It is recommended to use the default format unless you have specific requirements.
+                    The Hunyuan transformer is loaded from bfloat16 checkpoint weights, then stored as NVFP4-W4A16 with torchao. Only the weights are quantized. Activations stay bfloat16.
 
-                    Supported formats:
-
-                    - `brain_floating_point_16bit`: This is the default. This does not quantize the model. 16-bit floating point format for brain models.
-                    - `normal_float_4bit`: NF4 format for quantization.
-                    - `integer_8bit`: 8-bit integer format for quantization. Does not work with base FramePack's memory management.
-
-                    If you are unsure, leave it as `DEFAULT`. If you encounter issues with quantization, you can set it to `NONE` to disable quantization.
+                    The dropdown below is kept so older saved settings still load. It does not switch the transformer back to bitsandbytes.
                     """
+                )
+                nvfp4_w4a16 = gr.Checkbox(
+                    label="NVFP4-W4A16",
+                    value=bool(settings.get("nvfp4_w4a16", False)),
+                    info="Force the packed NVFP4 checkpoint even when the bfloat16 weights fit in VRAM. Create it with scripts/convert_bf16_to_nvfp4.py. It cuts VRAM by 17 GB but increases inference time by 0.4 seconds per step.",
                 )
                 quantization_format = gr.Dropdown(
                     label="Quantization Format",
                     choices=[format.value for format in QuantizationFormat],
                     value=settings.quantization_format.value,
-                    info="Select the quantization format for model weights.",
+                    info="The transformer uses NVFP4-W4A16 on GPU. This value is stored for compatibility.",
                 )
             save_btn = gr.Button("💾 Save Settings")
             cleanup_btn = gr.Button("🗑️ Clean Up Temporary Files")
@@ -200,6 +199,7 @@ def create_settings_ui(settings, get_latents_display_top, model_type_choices):
         "cleanup_output": cleanup_output,
         "lora_loader": lora_loader,
         "reuse_model_instance": reuse_model_instance,
+        "nvfp4_w4a16": nvfp4_w4a16,
         "quantization_format": quantization_format,
     }
 

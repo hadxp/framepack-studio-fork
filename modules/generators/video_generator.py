@@ -223,7 +223,7 @@ class VideoModelGenerator(VideoBaseModelGenerator):
                 1 - end_frame_weight
             ) * end_of_input_video_embedding + end_clip_embedding * end_frame_weight
             image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(
-                self.transformer.dtype
+                self.transformer.activation_dtype
             )
 
             if is_end_of_video:

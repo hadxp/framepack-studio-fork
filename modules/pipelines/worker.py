@@ -759,7 +759,7 @@ def worker(
                         end_frame_np, feature_extractor, image_encoder
                     ).last_hidden_state
                     end_clip_embedding = end_clip_embedding.to(
-                        studio_module.current_generator.transformer.dtype
+                        studio_module.current_generator.transformer.activation_dtype
                     )
                     # Need that dtype conversion for end_clip_embedding? I don't think so, but it was in the original PR.
 
@@ -775,25 +775,22 @@ def worker(
                 preserved_memory_gb=settings.get("gpu_memory_preservation"),
             )
 
-        # Dtype
+        # Activations stay bfloat16. NVFP4-W4A16 quantizes weights only.
+        activation_dtype = studio_module.current_generator.transformer.activation_dtype
         for prompt_key in encoded_prompts:
             llama_vec, llama_attention_mask, clip_l_pooler = encoded_prompts[prompt_key]
-            llama_vec = llama_vec.to(studio_module.current_generator.transformer.dtype)
-            clip_l_pooler = clip_l_pooler.to(
-                studio_module.current_generator.transformer.dtype
-            )
+            llama_vec = llama_vec.to(activation_dtype)
+            clip_l_pooler = clip_l_pooler.to(activation_dtype)
             encoded_prompts[prompt_key] = (
                 llama_vec,
                 llama_attention_mask,
                 clip_l_pooler,
             )
 
-        llama_vec_n = llama_vec_n.to(studio_module.current_generator.transformer.dtype)
-        clip_l_pooler_n = clip_l_pooler_n.to(
-            studio_module.current_generator.transformer.dtype
-        )
+        llama_vec_n = llama_vec_n.to(activation_dtype)
+        clip_l_pooler_n = clip_l_pooler_n.to(activation_dtype)
         image_encoder_last_hidden_state = image_encoder_last_hidden_state.to(
-            studio_module.current_generator.transformer.dtype
+            activation_dtype
         )
 
         # Sampling
@@ -859,7 +856,18 @@ def worker(
                 lora_values,
             )
 
-            # --- Callback for progress ---
+        # Pack bfloat16 linears only when the checkbox is on or the checkpoint
+        # does not fit in usable VRAM. A checkpoint that fits stays bfloat16.
+        if studio_module.current_generator.should_memory_quantize_bf16():
+            stream_to_use.output_queue.push(
+                (
+                    "progress",
+                    (None, "", make_progress_bar_html(0, "Applying NVFP4-W4A16 ...")),
+                )
+            )
+            studio_module.current_generator.transformer.apply_nvfp4_w4a16()
+
+        # --- Callback for progress ---
 
         def callback(d):
             nonlocal last_step_time, step_durations, history_pixels, job_params
@@ -1308,6 +1316,8 @@ def worker(
                 target_device=gpu,
                 preserved_memory_gb=settings.get("gpu_memory_preservation"),
             )
+            if studio_module.current_generator.should_memory_quantize_bf16():
+                studio_module.current_generator.transformer.apply_nvfp4_w4a16()
 
             if selected_loras:
                 studio_module.current_generator.move_lora_adapters_to_device(gpu)

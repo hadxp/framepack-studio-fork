@@ -306,6 +306,7 @@ class ModelConfiguration:
     model_name: str
     quantization_format: str
     settings: ModelSettings = field(default_factory=ModelSettings)
+    nvfp4_w4a16: bool = False
 
     @property
     def _hash(self) -> str:
@@ -332,7 +333,10 @@ class ModelConfiguration:
 
     @staticmethod
     def from_settings(
-        model_name: str, quantization_format: str, settings: ModelSettings | dict | None
+        model_name: str,
+        quantization_format: str,
+        settings: ModelSettings | dict | None,
+        nvfp4_w4a16: bool = False,
     ):
         model_settings: ModelSettings | None = None
         if settings is None:
@@ -351,6 +355,7 @@ class ModelConfiguration:
             model_name=model_name,
             quantization_format=quantization_format,
             settings=model_settings,
+            nvfp4_w4a16=bool(nvfp4_w4a16),
         )
 
     @staticmethod
@@ -360,6 +365,7 @@ class ModelConfiguration:
         lora_names: list[str],
         lora_weights: list[float | int],
         lora_loader: str | LoraLoader,
+        nvfp4_w4a16: bool = False,
     ) -> "ModelConfiguration":
         assert isinstance(model_name, str) and model_name, (
             "model_name must be a non-empty string"
@@ -385,6 +391,7 @@ class ModelConfiguration:
             model_name=model_name,
             quantization_format=quantization_format,
             settings=model_settings,
+            nvfp4_w4a16=nvfp4_w4a16,
         )
 
     def set_model_name(self, model_name: str) -> "ModelConfiguration":

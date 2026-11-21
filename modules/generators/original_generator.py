@@ -1,11 +1,8 @@
 import logging
 import torch
-from diffusers_helper.models.hunyuan_video_packed import (
-    HunyuanVideoTransformer3DModelPacked,
-)
 from diffusers_helper.memory import DynamicSwapInstaller
 from .base_generator import BaseModelGenerator
-from shared import QuantizationFormat, timer
+from shared import timer
 
 logger = logging.getLogger(__name__)
 
@@ -38,25 +35,7 @@ class OriginalModelGenerator(BaseModelGenerator):
         """
         logger.info(f"Loading {self.model_name} Transformer...")
 
-        path_to_load = self.model_path  # Initialize with the default path
-
-        if self.offline:
-            path_to_load = (
-                self._get_offline_load_path()
-            )  # Calls the method in BaseModelGenerator
-
-        # Create the transformer model
-        self.transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained(
-            path_to_load,
-            torch_dtype=torch.bfloat16,
-            quantization_config=self.quantization_config,
-        ).cpu()
-
-        # Configure the model
-        self.transformer.eval()
-        if self.quantization_format == QuantizationFormat.brain_floating_point_16bit:
-            self.transformer.to(dtype=torch.bfloat16)
-        self.transformer.requires_grad_(False)
+        self.transformer = self._load_transformer_weights()
 
         # Set up dynamic swap if not in high VRAM mode
         if not self.high_vram:
@@ -65,7 +44,7 @@ class OriginalModelGenerator(BaseModelGenerator):
             # In high VRAM mode, move the entire model to GPU
             self.transformer.to(device=self.gpu)
 
-        logger.info(f"{self.model_name} Transformer Loaded from {path_to_load}.")
+        logger.info(f"{self.model_name} Transformer loaded.")
         return self.transformer
 
     def prepare_history_latents(self, height, width):

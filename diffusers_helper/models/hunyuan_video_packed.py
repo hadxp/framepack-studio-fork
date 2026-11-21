@@ -1,5 +1,9 @@
 from typing import Optional, Tuple
 
+from diffusers_helper.torchao_compat import install_torchao_diffusers_compat
+
+install_torchao_diffusers_compat()
+
 import torch
 import einops
 import torch.nn as nn
@@ -953,6 +957,31 @@ class HunyuanVideoPatchEmbedForCleanLatents(nn.Module):
         return
 
 
+# NVFP4 packs two 4-bit values per byte along the last dimension and uses a block of 16.
+_NVFP4_BLOCK_SIZE = 16
+
+
+def _is_nvfp4_weight(weight) -> bool:
+    return type(weight).__name__ == "NVFP4Tensor"
+
+
+def _eligible_nvfp4_w4a16_linear(module, fqn="") -> bool:
+    """Linear layers whose weight can be stored as NVFP4. Activations stay bf16."""
+    if not isinstance(module, nn.Linear):
+        return False
+    weight = getattr(module, "weight", None)
+    if weight is None or getattr(weight, "ndim", 0) != 2:
+        return False
+    if _is_nvfp4_weight(weight):
+        return False
+    if (
+        weight.shape[-1] % _NVFP4_BLOCK_SIZE != 0
+        or weight.shape[-2] % _NVFP4_BLOCK_SIZE != 0
+    ):
+        return False
+    return True
+
+
 class HunyuanVideoTransformer3DModelPacked(
     ModelMixin, ConfigMixin, PeftAdapterMixin, FromOriginalModelMixin
 ):
@@ -1097,6 +1126,91 @@ class HunyuanVideoTransformer3DModelPacked(
 
     def uninstall_magcache(self):
         self.magcache = None
+
+    @property
+    def activation_dtype(self) -> torch.dtype:
+        """Compute dtype for activations. NVFP4-W4A16 quantizes weights only."""
+        return torch.bfloat16
+
+    def restore_unquantized_bf16_weights(self) -> None:
+        """Replace NVFP4 linear weights with bf16 copies so a later loader can write them."""
+        restored = 0
+        with torch.no_grad():
+            for module in self.modules():
+                weight = getattr(module, "weight", None)
+                if not isinstance(module, nn.Linear) or not _is_nvfp4_weight(weight):
+                    continue
+                module.weight = nn.Parameter(
+                    weight.dequantize(torch.bfloat16), requires_grad=False
+                )
+                restored += 1
+        if restored:
+            logger.info("Restored %s NVFP4 linear weights to bfloat16.", restored)
+
+    def apply_nvfp4_w4a16(self) -> int:
+        """Store eligible Linear weights as NVFP4-W4A16.
+
+        Call this after the module holds bfloat16 checkpoint weights (including a
+        merged LoRA state dict). torchao ``NVFP4WeightOnlyConfig`` quantizes
+        weights only. Activations and the matmul stay in bfloat16. Layers whose
+        dimensions are not divisible by 16 are left in bfloat16. Already
+        quantized weights are left unchanged.
+        """
+        install_torchao_diffusers_compat()
+        try:
+            from torchao.prototype.mx_formats.inference_workflow import (
+                NVFP4WeightOnlyConfig,
+            )
+            from torchao.quantization import quantize_
+        except ImportError as exc:
+            raise ImportError(
+                "NVFP4-W4A16 requires torchao. Install it with: pip install 'torchao>=0.15.0'"
+            ) from exc
+
+        pending = []
+        for module in self.modules():
+            if _eligible_nvfp4_w4a16_linear(module):
+                pending.append(module)
+
+        if not pending:
+            logger.debug("NVFP4-W4A16: no bfloat16 linear weights left to quantize.")
+            return 0
+
+        with torch.no_grad():
+            for module in pending:
+                weight = module.weight.detach()
+                if weight.dtype != torch.bfloat16 or not weight.is_contiguous():
+                    module.weight = nn.Parameter(
+                        weight.to(dtype=torch.bfloat16).contiguous(),
+                        requires_grad=False,
+                    )
+
+        logger.info(
+            "Quantizing %s linear layers to NVFP4-W4A16 (weights only, activations stay bfloat16).",
+            len(pending),
+        )
+        quantize_(
+            self,
+            NVFP4WeightOnlyConfig(use_dynamic_per_tensor_scale=True),
+            filter_fn=_eligible_nvfp4_w4a16_linear,
+        )
+
+        quantized = 0
+        for module in pending:
+            if _is_nvfp4_weight(module.weight):
+                quantized += 1
+        if quantized != len(pending):
+            logger.warning(
+                "NVFP4-W4A16 quantized %s of %s eligible linear layers.",
+                quantized,
+                len(pending),
+            )
+        else:
+            logger.info("NVFP4-W4A16 applied to %s linear layers.", quantized)
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return quantized
 
     def gradient_checkpointing_method(self, block, *args):
         if self.use_gradient_checkpointing:

@@ -91,6 +91,7 @@ class ModelState:
                 lora_names=selected_loras,
                 lora_weights=selected_lora_values,
                 lora_loader=settings.lora_loader,
+                nvfp4_w4a16=settings.nvfp4_w4a16,
             )
         )
 
@@ -143,6 +144,7 @@ class ModelState:
                 lora_names=selected_loras,
                 lora_weights=selected_lora_values,
                 lora_loader=current_generator.settings.lora_loader,
+                nvfp4_w4a16=current_generator.settings.nvfp4_w4a16,
             )
         )
 

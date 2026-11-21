@@ -63,6 +63,10 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"  # Prevent tokenizers parallelism
 
 # ruff: noqa: E402 - Disable E402 for imports at the top of the file. HF_HOME must be set before importing diffusers and transformers.
 # Site packages
+from diffusers_helper.torchao_compat import install_torchao_diffusers_compat
+
+install_torchao_diffusers_compat()
+
 from diffusers import AutoencoderKLHunyuanVideo
 from transformers import LlamaModel, CLIPTextModel, LlamaTokenizerFast, CLIPTokenizer
 from transformers import SiglipImageProcessor, SiglipVisionModel

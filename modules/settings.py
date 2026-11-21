@@ -50,6 +50,7 @@ Enhanced prompt:""",
             "lora_loader": LoraLoader.DEFAULT,  # lora_loader options: diffusers, lora_ready. DEFAULT is existing behavior of diffusers
             "reuse_model_instance": False,  # Reuse model instance across generations - default of False is existing behavior
             "quantization_format": QuantizationFormat.DEFAULT,  # Default quantization format
+            "nvfp4_w4a16": False,  # Force the packed NVFP4-W4A16 checkpoint
         }
         self.settings = self.load_settings()
 
@@ -92,6 +93,10 @@ Enhanced prompt:""",
             value = QuantizationFormat.safe_parse(value)
 
         self.set("quantization_format", value)
+
+    @property
+    def nvfp4_w4a16(self) -> bool:
+        return bool(self.settings.get("nvfp4_w4a16", False))
 
     def load_settings(self) -> Dict[str, Any]:
         """Load settings from file or return defaults"""
