@@ -1,5 +1,9 @@
 import torch
 
+from diffusers_helper.torchao_compat import install_torchao_diffusers_compat
+
+install_torchao_diffusers_compat()
+
 from diffusers.pipelines.hunyuan_video.pipeline_hunyuan_video import (
     DEFAULT_PROMPT_TEMPLATE,
 )

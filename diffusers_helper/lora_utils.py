@@ -1,3 +1,7 @@
+from diffusers_helper.torchao_compat import install_torchao_diffusers_compat
+
+install_torchao_diffusers_compat()
+
 from pathlib import Path, PurePath
 from typing import Dict, List, Optional, Union, Tuple
 from diffusers.loaders.lora_pipeline import _fetch_state_dict

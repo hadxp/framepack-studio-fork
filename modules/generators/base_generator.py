@@ -91,11 +91,13 @@ class BaseModelGenerator(ABC):
             "quantization_format", QuantizationFormat.integer_8bit
         )
         if (
-            vram_mode.transformer_stays_on_gpu()
+            not self.settings.nvfp4_w4a16
+            and vram_mode.transformer_stays_on_gpu()
             and self.quantization_format
             == QuantizationFormat.brain_floating_point_16bit
         ):
-            # bf16 (26 GB) can't stay on the GPU; fp8 storage (13 GB) can
+            # bf16 (26 GB) can't stay on the GPU; fp8 storage (13 GB) can.
+            # The NVFP4 checkbox is its own weight format and skips this rewrite.
             self.quantization_format = QuantizationFormat.float8_storage
         self.set_quantization_config()
 
@@ -143,18 +145,23 @@ class BaseModelGenerator(ABC):
             self.transformer.to(device=self.gpu)
             return
         if self.settings.get("offload_engine", "legacy") == "streamed":
-            if self.quantization_format in (
+            if self._has_nvfp4_weights():
+                logger.info(
+                    "NVFP4 weights use the legacy offload. Block streaming moves plain tensors."
+                )
+            elif self.quantization_format in (
                 QuantizationFormat.brain_floating_point_16bit,
                 QuantizationFormat.float8_storage,
             ):
                 self.block_streamer = BlockStreamer(self.transformer, self.gpu)
                 return
-            # bitsandbytes weights carry state outside .data and can't be
-            # moved as plain tensors
-            logger.warning(
-                f"Block streaming needs bf16 or float8_storage weights, not "
-                f"{self.quantization_format}; using the legacy offload."
-            )
+            else:
+                # bitsandbytes weights carry state outside .data and can't be
+                # moved as plain tensors
+                logger.warning(
+                    f"Block streaming needs bf16 or float8_storage weights, not "
+                    f"{self.quantization_format}; using the legacy offload."
+                )
         DynamicSwapInstaller.install_model(self.transformer, device=self.gpu)
 
     def release_transformer(self):
@@ -162,6 +169,122 @@ class BaseModelGenerator(ABC):
         if self.block_streamer is not None:
             self.block_streamer.close()
             self.block_streamer = None
+
+    def _has_nvfp4_weights(self) -> bool:
+        if self.transformer is None:
+            return False
+        return any(
+            type(param).__name__ == "NVFP4Tensor"
+            for param in self.transformer.parameters()
+        )
+
+    def use_nvfp4_loader(self) -> bool:
+        """NVFP4 replaces the dev loader when forced, or when the packed file is required."""
+        from diffusers_helper.nvfp4_checkpoint import (
+            checkpoint_nbytes,
+            nvfp4_checkpoint_path,
+            resolve_model_dir,
+            should_use_nvfp4_checkpoint,
+            usable_vram_bytes,
+        )
+
+        if self.settings.nvfp4_w4a16:
+            return True
+        path_to_load = self.model_path
+        if self.offline:
+            path_to_load = self._get_offline_load_path()
+        preservation_gb = float(self.settings.get("gpu_memory_preservation", 6) or 0)
+        try:
+            model_dir = resolve_model_dir(path_to_load, offline=bool(self.offline))
+            weight_bytes = checkpoint_nbytes(model_dir)
+        except Exception:
+            logger.exception(
+                "Could not measure the bfloat16 checkpoint. Using the dev loader."
+            )
+            return False
+        return should_use_nvfp4_checkpoint(
+            weight_bytes,
+            usable_vram_bytes(preservation_gb),
+            nvfp4_checkpoint_path(model_dir).is_file(),
+            force=False,
+        )
+
+    def _load_transformer_weights(self) -> HunyuanVideoTransformer3DModelPacked:
+        """Load a packed NVFP4 file, or quantize bfloat16 when the checkbox requires it."""
+        from diffusers_helper.nvfp4_checkpoint import load_hunyuan_transformer
+
+        path_to_load = self.model_path
+        if self.offline:
+            path_to_load = self._get_offline_load_path()
+        preservation_gb = float(self.settings.get("gpu_memory_preservation", 6) or 0)
+        model = load_hunyuan_transformer(
+            path_to_load,
+            preservation_gb=preservation_gb,
+            offline=bool(self.offline),
+            force_nvfp4=self.settings.nvfp4_w4a16,
+        )
+        self.should_memory_quantize_bf16(refresh=True)
+        return model
+
+    def load_packed_transformer(self) -> HunyuanVideoTransformer3DModelPacked:
+        """Dev weight load, unless NVFP4 should supply the transformer instead."""
+        if self.use_nvfp4_loader():
+            self.transformer = self._load_transformer_weights()
+            return self.transformer
+
+        path_to_load = self.model_path
+        if self.offline:
+            path_to_load = self._get_offline_load_path()
+        self.transformer = HunyuanVideoTransformer3DModelPacked.from_pretrained(
+            path_to_load,
+            torch_dtype=torch.bfloat16,
+            quantization_config=self.quantization_config,
+        ).cpu()
+        self.transformer.eval()
+        if self.quantization_format in (
+            QuantizationFormat.brain_floating_point_16bit,
+            QuantizationFormat.float8_storage,
+        ):
+            self.transformer.to(dtype=torch.bfloat16)
+        self.transformer.requires_grad_(False)
+        self.apply_weight_storage()
+        self._memory_quantize_bf16 = False
+        return self.transformer
+
+    def should_memory_quantize_bf16(self, *, refresh: bool = False) -> bool:
+        """True when a loaded bfloat16 transformer should be packed in memory.
+
+        The checkbox off and a checkpoint that fits in usable VRAM stays bfloat16.
+        LoRA merges pass ``refresh=True`` so they use the same rule at merge time.
+        """
+        cached = getattr(self, "_memory_quantize_bf16", None)
+        if cached is not None and not refresh:
+            return cached
+        from diffusers_helper.nvfp4_checkpoint import (
+            checkpoint_nbytes,
+            resolve_model_dir,
+            should_memory_quantize_bf16,
+            usable_vram_bytes,
+        )
+
+        if self.settings.nvfp4_w4a16:
+            self._memory_quantize_bf16 = True
+            return True
+        path_to_load = self.model_path
+        if self.offline:
+            path_to_load = self._get_offline_load_path()
+        preservation_gb = float(self.settings.get("gpu_memory_preservation", 6) or 0)
+        weight_bytes = None
+        try:
+            model_dir = resolve_model_dir(path_to_load, offline=bool(self.offline))
+            weight_bytes = checkpoint_nbytes(model_dir)
+        except Exception:
+            logger.exception("Could not measure the bfloat16 checkpoint.")
+        decision = should_memory_quantize_bf16(
+            False, weight_bytes, usable_vram_bytes(preservation_gb)
+        )
+        self._memory_quantize_bf16 = decision
+        return decision
 
     @abstractmethod
     def load_model(self) -> HunyuanVideoTransformer3DModelPacked:
@@ -487,6 +610,7 @@ class BaseModelGenerator(ABC):
             selected_loras,
             selected_lora_values,
             self.settings.lora_loader,
+            nvfp4_w4a16=self.settings.nvfp4_w4a16,
         )
 
         active_model_hash = self.__compute_lora_state_hash(active_model_configuration)
@@ -531,9 +655,15 @@ class BaseModelGenerator(ABC):
                 model_files = glob.glob(
                     os.path.join(subdir, "**", "*.safetensors"), recursive=True
                 ) + glob.glob(os.path.join(subdir, "**", "*.pt"), recursive=True)
+                model_files = [
+                    path
+                    for path in model_files
+                    if not os.path.basename(path).endswith("-nvfp4.safetensors")
+                ]
                 model_files.sort()
                 return model_files
 
+            pack_after_lora = self.settings.nvfp4_w4a16 or self._has_nvfp4_weights()
             try:
                 model_files = _find_model_files(self.model_path)
                 logger.debug(f"LoRA -> Found model files: {model_files}")
@@ -556,21 +686,36 @@ class BaseModelGenerator(ABC):
                         "No valid LoRA paths found for the selected LoRAs."
                     )
 
+                if pack_after_lora and self.settings.get("fp8", False):
+                    logger.info(
+                        "Skipping Kohya fp8 optimization. The merged state dict stays bfloat16, then NVFP4-W4A16 is applied when it does not fit."
+                    )
                 state_dict = load_and_apply_lora(
                     model_files=model_files,
                     lora_paths=lora_paths,
                     lora_scales=lora_scales,
-                    fp8_enabled=cast(bool, self.settings.get("fp8", False)),
+                    fp8_enabled=False
+                    if pack_after_lora
+                    else cast(bool, self.settings.get("fp8", False)),
                     device=self.gpu if torch.cuda.is_available() else self.cpu,
                 )
+                if pack_after_lora:
+                    for key, value in list(state_dict.items()):
+                        if (
+                            torch.is_tensor(value)
+                            and torch.is_floating_point(value)
+                            and value.dtype != torch.bfloat16
+                        ):
+                            state_dict[key] = value.to(dtype=torch.bfloat16)
                 logger.debug("Loading state dict into transformer...")
                 # With fp8 storage, copy into the existing fp8 weights (cast,
                 # and kept on whatever device they are on); assigning would
                 # swap in the merged bf16 tensors from system RAM.
+                # NVFP4 must assign, because the packed weights are not fp8 parameters.
                 missing_keys, unexpected_keys = self.transformer.load_state_dict(
                     state_dict,
-                    assign=self.quantization_format
-                    != QuantizationFormat.float8_storage,
+                    assign=pack_after_lora
+                    or self.quantization_format != QuantizationFormat.float8_storage,
                     strict=True,
                 )
 
@@ -607,6 +752,13 @@ class BaseModelGenerator(ABC):
                 except Exception:
                     logger.warning("Could not free state dictionary from memory.")
 
+                if pack_after_lora and self.should_memory_quantize_bf16(refresh=True):
+                    self.transformer.apply_nvfp4_w4a16()
+                elif pack_after_lora:
+                    logger.info(
+                        "bfloat16 weights fit in usable VRAM. Leaving the LoRA merge in bfloat16."
+                    )
+
             except Exception as e:
                 logger.exception(
                     f"Error loading LoRAs with kohya_ss LoRAReady loader: {e}"
@@ -618,6 +770,10 @@ class BaseModelGenerator(ABC):
                 "Unsupported LoRA loader: {}".format(self.settings.lora_loader)
             )
 
+        pack_after_lora = self.settings.nvfp4_w4a16 or self._has_nvfp4_weights()
+        if pack_after_lora:
+            # PEFT reads the base linear weights, so restore bfloat16 before injection.
+            self.transformer.restore_unquantized_bf16_weights()
         self.unload_loras()
         adapter_names = []
         strengths = []
@@ -667,4 +823,10 @@ class BaseModelGenerator(ABC):
             )
             lora_utils.set_adapters(self.transformer, adapter_names, strengths)
 
+        if pack_after_lora and self.should_memory_quantize_bf16(refresh=True):
+            self.transformer.apply_nvfp4_w4a16()
+        elif pack_after_lora:
+            logger.info(
+                "bfloat16 weights fit in usable VRAM. Leaving the LoRA adapters on bfloat16."
+            )
         self.verify_lora_state("After completing load_loras")

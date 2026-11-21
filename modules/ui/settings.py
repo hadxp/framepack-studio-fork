@@ -158,6 +158,14 @@ def create_settings_ui(settings):
                         "Streamed copies whole blocks ahead of time from pinned "
                         "memory; it needs bf16 or float8_storage.",
                     )
+                    nvfp4_w4a16 = gr.Checkbox(
+                        label="NVFP4-W4A16",
+                        value=bool(settings.get("nvfp4_w4a16", False)),
+                        info="Force the packed NVFP4 checkpoint even when the bfloat16 "
+                        "weights fit in VRAM. Create it with "
+                        "scripts/convert_bf16_to_nvfp4.py. It cuts VRAM by 17 GB but "
+                        "increases inference time by 0.4 seconds per step.",
+                    )
                     lora_loader = gr.Dropdown(
                         label="LoRA loader",
                         choices=[loader.value for loader in LoraLoader],
@@ -192,6 +200,7 @@ def create_settings_ui(settings):
         "gradio_theme": gradio_theme,
         "gpu_memory_preservation": gpu_memory_preservation,
         "reuse_model_instance": reuse_model_instance,
+        "nvfp4_w4a16": nvfp4_w4a16,
         "quantization_format": quantization_format,
         "vram_mode": vram_mode_setting,
         "offload_engine": offload_engine,

@@ -52,6 +52,7 @@ Enhanced prompt:""",
             "quantization_format": QuantizationFormat.DEFAULT,  # Default quantization format
             "vram_mode": "auto",  # auto, high, medium or low; see modules/vram_mode.py
             "offload_engine": "legacy",  # low VRAM mode: legacy or streamed; see diffusers_helper/streaming.py
+            "nvfp4_w4a16": False,  # Force the packed NVFP4-W4A16 checkpoint
         }
         self.settings = self.load_settings()
 
@@ -94,6 +95,10 @@ Enhanced prompt:""",
             value = QuantizationFormat.safe_parse(value)
 
         self.set("quantization_format", value)
+
+    @property
+    def nvfp4_w4a16(self) -> bool:
+        return bool(self.settings.get("nvfp4_w4a16", False))
 
     def load_settings(self) -> Dict[str, Any]:
         """Load settings from file or return defaults"""

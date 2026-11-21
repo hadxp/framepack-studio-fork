@@ -25,6 +25,7 @@ transformers==4.46.2
 
 # quantization
 bitsandbytes>=0.41.1
+torchao>=0.17.0
 
 # for toolbox
 basicsr
@@ -40,3 +41,6 @@ torchcodec
 # mmaudio
 moviepy
 -r ./modules/MMAudio/requirements.txt
+
+# VideoFaceSwapper
+-r ./modules/VideoFaceSwapper/requirements.txt

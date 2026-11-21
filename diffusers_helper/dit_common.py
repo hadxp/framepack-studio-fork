@@ -1,6 +1,10 @@
 import torch
 import accelerate.accelerator
 
+from diffusers_helper.torchao_compat import install_torchao_diffusers_compat
+
+install_torchao_diffusers_compat()
+
 from diffusers.models.normalization import (
     RMSNorm,
     LayerNorm,
