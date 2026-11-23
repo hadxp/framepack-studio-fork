@@ -102,12 +102,9 @@ with sync_playwright() as p:
 
     # Capability gating
     radio(pg, "F1")
-    pg.get_by_role("tab", name="Keyframes", exact=True).click()
     time.sleep(0.8)
-    reason = pg.locator(".field-note.warn").filter(
-        has_text="Keyframes only works with Original"
-    )
-    check("F1 explains why keyframes are off", reason.count() >= 1)
+    check("F1 hides the timeline", not pg.locator("#create-timeline").is_visible())
+    check("F1 hides Motion", not pg.locator(".motion-group").is_visible())
     radio(pg, "Video")
     check(
         "Video without a video blocks the queue",

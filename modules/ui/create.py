@@ -7,7 +7,8 @@ live preview, checks, the queue button and what's up next.
 
 Which controls are usable comes from modules.ui.capabilities, so a feature
 the chosen model can't use is disabled with a reason instead of being
-silently dropped by the worker.
+silently dropped by the worker. The timeline and the Motion section are
+hidden when the model is F1, and shown when it is Original.
 """
 
 import json
@@ -86,11 +87,28 @@ def _bucket_text(img, width, height):
     return f"Output size **{bucket_w} × {bucket_h}**"
 
 
+def _show_motion_and_timeline(model):
+    """Original uses the timeline and Motion. F1 does not."""
+    return model == "Original"
+
+
 def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
     initial_model, initial_source = "Original", "Image"
+    startup = "None"
+    if settings is not None:
+        startup = settings.get("startup_model_type", "None")
+    if startup and startup != "None":
+        initial_model, initial_source = caps.from_legacy(startup)
+    show_motion = _show_motion_and_timeline(initial_model)
 
-    # The timeline runs along the top of the Create tab, above both columns
-    timeline = Timeline(label="Timeline", elem_id="create-timeline", interactive=True)
+    # The timeline runs along the top of the Create tab, above both columns.
+    # Hidden for F1; shown again when the model is Original.
+    timeline = Timeline(
+        label="Timeline",
+        elem_id="create-timeline",
+        interactive=True,
+        visible=show_motion,
+    )
 
     with gr.Row(elem_id="create-root", equal_height=False):
         # ------------------------------------------------------------------ job
@@ -243,8 +261,10 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                     _bucket_text(None, 640, 640), elem_classes="field-note right"
                 )
 
-            # Motion
-            with gr.Column(elem_classes="motion-group"):
+            # Motion. Hidden for F1; shown again when the model is Original.
+            with gr.Column(
+                elem_classes="motion-group", visible=show_motion
+            ) as motion_group:
                 gr.Markdown("### Motion", elem_classes="section-title")
                 with gr.Tabs(elem_id="motion-tabs", selected="keyframes"):
                     # Hidden: warped noise breaks the real model even at low
@@ -634,6 +654,7 @@ def connect_create_events(g, f, settings, dummy_lora_name):
         }
         keyframes_ok = not notes["keyframes"]
         end_ok = not notes["end_frame"]
+        show_motion = _show_motion_and_timeline(model)
         return [
             gr.update(visible=not is_video),  # image_col
             gr.update(visible=is_video),  # video_col
@@ -656,6 +677,8 @@ def connect_create_events(g, f, settings, dummy_lora_name):
                 choices=(names := presets.list_presets(model, source)),
                 value=preset if preset in names else None,
             ),
+            gr.update(visible=show_motion),  # timeline
+            gr.update(visible=show_motion),  # motion_group
         ]
 
     setup_outputs = [
@@ -678,6 +701,8 @@ def connect_create_events(g, f, settings, dummy_lora_name):
         g["batch_accordion"],
         g["caption_btn"],
         g["preset_dropdown"],
+        g["timeline"],
+        g["motion_group"],
     ]
 
     # ---- timeline -----------------------------------------------------------
