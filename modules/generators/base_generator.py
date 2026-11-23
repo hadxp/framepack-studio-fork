@@ -3,12 +3,10 @@ import torch
 import os  # required for os.path
 from abc import ABC, abstractmethod
 from dataclasses import asdict
-from diffusers_helper import lora_utils
 from typing import List, Optional, cast
 from pathlib import Path
 from transformers import BitsAndBytesConfig
 
-from diffusers_helper.lora_utils_kohya_ss.enums import LoraLoader
 from diffusers_helper.memory import DynamicSwapInstaller
 from diffusers_helper.streaming import BlockStreamer
 from diffusers_helper.models.hunyuan_video_packed import (
@@ -426,119 +424,11 @@ class BaseModelGenerator(ABC):
         return self.model_path
 
     def unload_loras(self):
+        """LoRA Ready bakes the weights into the checkpoint, so nothing is detached here.
+
+        The next load_loras call rebuilds the merged state dict from the base files.
         """
-        Unload all LoRAs from the transformer model.
-        """
-        if self.transformer is not None:
-            logger.info(f"Unloading all LoRAs from {self.get_model_name()} model")
-            self.transformer = lora_utils.unload_all_loras(self.transformer)
-            self.verify_lora_state("After unloading LoRAs")
-            import gc
-
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    def verify_lora_state(self, label=""):
-        """
-        Debug function to verify the state of LoRAs in the transformer model.
-        """
-        if self.transformer is None:
-            logger.debug(f"[{label}] Transformer is None, cannot verify LoRA state")
-            return
-
-        has_loras = False
-        if hasattr(self.transformer, "peft_config"):
-            adapter_names = (
-                list(self.transformer.peft_config.keys())
-                if self.transformer.peft_config
-                else []
-            )
-            if adapter_names:
-                has_loras = True
-                logger.debug(
-                    f"[{label}] Transformer has LoRAs: {', '.join(adapter_names)}"
-                )
-            else:
-                logger.debug(f"[{label}] Transformer has no LoRAs in peft_config")
-        else:
-            logger.debug(f"[{label}] Transformer has no peft_config attribute")
-
-        # Check for any LoRA modules
-        for name, module in self.transformer.named_modules():
-            if hasattr(module, "lora_A") and module.lora_A:
-                has_loras = True
-                # print(f"[{label}] Found lora_A in module {name}")
-            if hasattr(module, "lora_B") and module.lora_B:
-                has_loras = True
-                # print(f"[{label}] Found lora_B in module {name}")
-
-        if not has_loras:
-            logger.debug(f"[{label}] No LoRA components found in transformer")
-
-    def move_lora_adapters_to_device(self, target_device):
-        """
-        Move all LoRA adapters in the transformer model to the specified device.
-        This handles the PEFT implementation of LoRA.
-        """
-        if self.transformer is None:
-            return
-
-        logger.debug(f"Moving all LoRA adapters to {target_device}")
-
-        # First, find all modules with LoRA adapters
-        lora_modules = []
-        for name, module in self.transformer.named_modules():
-            if (
-                hasattr(module, "active_adapter")
-                and hasattr(module, "lora_A")
-                and hasattr(module, "lora_B")
-            ):
-                lora_modules.append((name, module))
-
-        # Now move all LoRA components to the target device
-        for name, module in lora_modules:
-            # Get the active adapter name
-            active_adapter = module.active_adapter
-
-            # Move the LoRA layers to the target device
-            if active_adapter is not None:
-                if isinstance(module.lora_A, torch.nn.ModuleDict):
-                    # Handle ModuleDict case (PEFT implementation)
-                    for adapter_name in list(module.lora_A.keys()):
-                        # Move lora_A
-                        if adapter_name in module.lora_A:
-                            module.lora_A[adapter_name] = module.lora_A[
-                                adapter_name
-                            ].to(target_device)
-
-                        # Move lora_B
-                        if adapter_name in module.lora_B:
-                            module.lora_B[adapter_name] = module.lora_B[
-                                adapter_name
-                            ].to(target_device)
-
-                        # Move scaling
-                        if (
-                            hasattr(module, "scaling")
-                            and isinstance(module.scaling, dict)
-                            and adapter_name in module.scaling
-                        ):
-                            if isinstance(module.scaling[adapter_name], torch.Tensor):
-                                module.scaling[adapter_name] = module.scaling[
-                                    adapter_name
-                                ].to(target_device)
-                else:
-                    # Handle direct attribute case
-                    if hasattr(module, "lora_A") and module.lora_A is not None:
-                        module.lora_A = module.lora_A.to(target_device)
-                    if hasattr(module, "lora_B") and module.lora_B is not None:
-                        module.lora_B = module.lora_B.to(target_device)
-                    if hasattr(module, "scaling") and module.scaling is not None:
-                        if isinstance(module.scaling, torch.Tensor):
-                            module.scaling = module.scaling.to(target_device)
-
-        logger.debug(f"Moved all LoRA adapters to {target_device}")
+        return
 
     def __compute_lora_state_hash(self, lora_config: ModelConfiguration) -> str:
         """
@@ -634,199 +524,136 @@ class BaseModelGenerator(ABC):
 
         lora_dir = Path(lora_folder)
 
-        if self.settings.lora_loader == LoraLoader.LORA_READY:
-            from diffusers_helper.lora_utils_kohya_ss.lora_loader import (
-                load_and_apply_lora,
+        from diffusers_helper.lora_utils_kohya_ss.lora_loader import (
+            load_and_apply_lora,
+        )
+
+        logger.info(f"Loading LoRAs using kohya_ss LoRAReady loader from {lora_dir}")
+
+        def _find_model_files(model_path):
+            """Get state dictionary file from specified model path
+            This is undesirable as it depends on Diffusers implementation."""
+            import glob
+
+            model_root = os.environ["HF_HOME"]  # './hf_download'?
+            subdir = os.path.join(
+                model_root, "hub", "models--" + model_path.replace("/", "--")
             )
-
-            logger.info(
-                f"Loading LoRAs using kohya_ss LoRAReady loader from {lora_dir}"
-            )
-
-            def _find_model_files(model_path):
-                """Get state dictionary file from specified model path
-                This is undesirable as it depends on Diffusers implementation."""
-                import glob
-
-                model_root = os.environ["HF_HOME"]  # './hf_download'?
-                subdir = os.path.join(
-                    model_root, "hub", "models--" + model_path.replace("/", "--")
-                )
-                model_files = glob.glob(
-                    os.path.join(subdir, "**", "*.safetensors"), recursive=True
-                ) + glob.glob(os.path.join(subdir, "**", "*.pt"), recursive=True)
-                model_files = [
-                    path
-                    for path in model_files
-                    if not os.path.basename(path).endswith("-nvfp4.safetensors")
-                ]
-                model_files.sort()
-                return model_files
-
-            pack_after_lora = self.settings.nvfp4_w4a16 or self._has_nvfp4_weights()
-            try:
-                model_files = _find_model_files(self.model_path)
-                logger.debug(f"LoRA -> Found model files: {model_files}")
-                lora_paths = [
-                    # not sure why the full path is not passed around and potentially trimmed for the interface display
-                    str(lora_dir / f"{lora_setting.name}.safetensors")
-                    if Path(lora_dir / f"{lora_setting.name}.safetensors").exists()
-                    else str(
-                        lora_dir / f"{lora_setting.name}.pt"
-                    )  # hopefully .pt is the correct extension.
-                    for lora_setting in active_model_configuration.settings.lora_settings
-                ]
-                lora_scales: list[float] = [
-                    lora_setting.weight
-                    for lora_setting in active_model_configuration.settings.lora_settings
-                ]
-                logger.debug(f"Lora paths: {lora_paths}")
-                if not lora_paths:
-                    raise ValueError(
-                        "No valid LoRA paths found for the selected LoRAs."
-                    )
-
-                if pack_after_lora and self.settings.get("fp8", False):
-                    logger.info(
-                        "Skipping Kohya fp8 optimization. The merged state dict stays bfloat16, then NVFP4-W4A16 is applied when it does not fit."
-                    )
-                state_dict = load_and_apply_lora(
-                    model_files=model_files,
-                    lora_paths=lora_paths,
-                    lora_scales=lora_scales,
-                    fp8_enabled=False
-                    if pack_after_lora
-                    else cast(bool, self.settings.get("fp8", False)),
-                    device=self.gpu if torch.cuda.is_available() else self.cpu,
-                )
-                if pack_after_lora:
-                    for key, value in list(state_dict.items()):
-                        if (
-                            torch.is_tensor(value)
-                            and torch.is_floating_point(value)
-                            and value.dtype != torch.bfloat16
-                        ):
-                            state_dict[key] = value.to(dtype=torch.bfloat16)
-                logger.debug("Loading state dict into transformer...")
-                # With fp8 storage, copy into the existing fp8 weights (cast,
-                # and kept on whatever device they are on); assigning would
-                # swap in the merged bf16 tensors from system RAM.
-                # NVFP4 must assign, because the packed weights are not fp8 parameters.
-                missing_keys, unexpected_keys = self.transformer.load_state_dict(
-                    state_dict,
-                    assign=pack_after_lora
-                    or self.quantization_format != QuantizationFormat.float8_storage,
-                    strict=True,
-                )
-
-                if missing_keys:
-                    logger.warning(
-                        f"Missing keys when loading LoRA state dict: {missing_keys}"
-                    )
-                if unexpected_keys:
-                    logger.warning(
-                        f"Unexpected keys when loading LoRA state dict: {unexpected_keys}"
-                    )
-
-                state_dict_size: int = 0
-                try:
-                    state_dict_size = sum(
-                        param.numel() * param.element_size()
-                        for param in state_dict.values()
-                        if hasattr(param, "numel")
-                    )
-                    logger.debug(
-                        f"State dictionary size: {state_dict_size / (1024**3):.2f} GB"
-                    )
-                except Exception:
-                    pass
-
-                try:
-                    del state_dict
-                    import gc
-
-                    gc.collect()
-                    logger.debug(
-                        f"Freed state dictionary size: {state_dict_size / (1024**3):.2f} GB"
-                    )
-                except Exception:
-                    logger.warning("Could not free state dictionary from memory.")
-
-                if pack_after_lora and self.should_memory_quantize_bf16(refresh=True):
-                    self.transformer.apply_nvfp4_w4a16()
-                elif pack_after_lora:
-                    logger.info(
-                        "bfloat16 weights fit in usable VRAM. Leaving the LoRA merge in bfloat16."
-                    )
-
-            except Exception as e:
-                logger.exception(
-                    f"Error loading LoRAs with kohya_ss LoRAReady loader: {e}"
-                )
-            return
-
-        if self.settings.lora_loader != LoraLoader.DIFFUSERS:
-            raise NotImplementedError(
-                "Unsupported LoRA loader: {}".format(self.settings.lora_loader)
-            )
+            model_files = glob.glob(
+                os.path.join(subdir, "**", "*.safetensors"), recursive=True
+            ) + glob.glob(os.path.join(subdir, "**", "*.pt"), recursive=True)
+            model_files = [
+                path
+                for path in model_files
+                if not os.path.basename(path).endswith("-nvfp4.safetensors")
+            ]
+            model_files.sort()
+            return model_files
 
         pack_after_lora = self.settings.nvfp4_w4a16 or self._has_nvfp4_weights()
-        if pack_after_lora:
-            # PEFT reads the base linear weights, so restore bfloat16 before injection.
-            self.transformer.restore_unquantized_bf16_weights()
-        self.unload_loras()
-        adapter_names = []
-        strengths = []
+        try:
+            model_files = _find_model_files(self.model_path)
+            logger.debug(f"LoRA -> Found model files: {model_files}")
+            lora_paths = [
+                # not sure why the full path is not passed around and potentially trimmed for the interface display
+                str(lora_dir / f"{lora_setting.name}.safetensors")
+                if Path(lora_dir / f"{lora_setting.name}.safetensors").exists()
+                else str(
+                    lora_dir / f"{lora_setting.name}.pt"
+                )  # hopefully .pt is the correct extension.
+                for lora_setting in active_model_configuration.settings.lora_settings
+            ]
+            lora_scales: list[float] = [
+                lora_setting.weight
+                for lora_setting in active_model_configuration.settings.lora_settings
+            ]
+            logger.debug(f"Lora paths: {lora_paths}")
+            if not lora_paths:
+                raise ValueError("No valid LoRA paths found for the selected LoRAs.")
 
-        for idx, lora_base_name in enumerate(selected_loras):
-            lora_file = None
-            for ext in (".safetensors", ".pt"):
-                candidate_path_relative = f"{lora_base_name}{ext}"
-                candidate_path_full = lora_dir / candidate_path_relative
-                if candidate_path_full.is_file():
-                    lora_file = candidate_path_relative
-                    break
-
-            if not lora_file:
-                logger.warning(
-                    f"LoRA file for base name '{lora_base_name}' not found; skipping."
+            if pack_after_lora and self.settings.get("fp8", False):
+                logger.info(
+                    "Skipping Kohya fp8 optimization. The merged state dict stays bfloat16, then NVFP4-W4A16 is applied when it does not fit."
                 )
-                continue
-
-            logger.debug(f"Loading LoRA from '{lora_file}'...")
-
-            self.transformer, adapter_name = lora_utils.load_lora(
-                self.transformer, lora_dir, lora_file
+            state_dict = load_and_apply_lora(
+                model_files=model_files,
+                lora_paths=lora_paths,
+                lora_scales=lora_scales,
+                fp8_enabled=False
+                if pack_after_lora
+                else cast(bool, self.settings.get("fp8", False)),
+                device=self.gpu if torch.cuda.is_available() else self.cpu,
             )
-            adapter_names.append(adapter_name)
-
-            weight = 1.0
-            if lora_values:
-                try:
-                    master_list_idx = lora_loaded_names.index(lora_base_name)
-                    if master_list_idx < len(lora_values):
-                        weight = float(lora_values[master_list_idx])
-                    else:
-                        logger.warning(
-                            f"Index mismatch for '{lora_base_name}'. Defaulting to 1.0."
-                        )
-                except ValueError:
-                    logger.warning(
-                        f"LoRA '{lora_base_name}' not found in master list. Defaulting to 1.0."
-                    )
-
-            strengths.append(weight)
-
-        if adapter_names:
-            logger.info(
-                f"Activating adapters: {adapter_names} with strengths: {strengths}"
+            quantize_merged = pack_after_lora and self.should_memory_quantize_bf16(
+                refresh=True
             )
-            lora_utils.set_adapters(self.transformer, adapter_names, strengths)
-
-        if pack_after_lora and self.should_memory_quantize_bf16(refresh=True):
-            self.transformer.apply_nvfp4_w4a16()
-        elif pack_after_lora:
-            logger.info(
-                "bfloat16 weights fit in usable VRAM. Leaving the LoRA adapters on bfloat16."
+            for key, value in list(state_dict.items()):
+                if not torch.is_tensor(value):
+                    continue
+                if (
+                    pack_after_lora
+                    and torch.is_floating_point(value)
+                    and value.dtype != torch.bfloat16
+                ):
+                    value = value.to(dtype=torch.bfloat16)
+                if quantize_merged and torch.cuda.is_available():
+                    value = value.to(device=self.gpu)
+                state_dict[key] = value
+            if quantize_merged and torch.cuda.is_available():
+                logger.info(
+                    "Moved merged bfloat16 LoRA weights to CUDA before NVFP4-W4A16."
+                )
+            logger.debug("Loading state dict into transformer...")
+            # With fp8 storage, copy into the existing fp8 weights (cast,
+            # and kept on whatever device they are on); assigning would
+            # swap in the merged bf16 tensors from system RAM.
+            # NVFP4 must assign, because the packed weights are not fp8 parameters.
+            missing_keys, unexpected_keys = self.transformer.load_state_dict(
+                state_dict,
+                assign=pack_after_lora
+                or self.quantization_format != QuantizationFormat.float8_storage,
+                strict=True,
             )
-        self.verify_lora_state("After completing load_loras")
+
+            if missing_keys:
+                logger.warning(
+                    f"Missing keys when loading LoRA state dict: {missing_keys}"
+                )
+            if unexpected_keys:
+                logger.warning(
+                    f"Unexpected keys when loading LoRA state dict: {unexpected_keys}"
+                )
+
+            state_dict_size: int = 0
+            try:
+                state_dict_size = sum(
+                    param.numel() * param.element_size()
+                    for param in state_dict.values()
+                    if hasattr(param, "numel")
+                )
+                logger.debug(
+                    f"State dictionary size: {state_dict_size / (1024**3):.2f} GB"
+                )
+            except Exception:
+                pass
+
+            try:
+                del state_dict
+                import gc
+
+                gc.collect()
+                logger.debug(
+                    f"Freed state dictionary size: {state_dict_size / (1024**3):.2f} GB"
+                )
+            except Exception:
+                logger.warning("Could not free state dictionary from memory.")
+
+            if quantize_merged:
+                self.transformer.apply_nvfp4_w4a16()
+            elif pack_after_lora:
+                logger.info(
+                    "bfloat16 weights fit in usable VRAM. Leaving the LoRA merge in bfloat16."
+                )
+
+        except Exception as e:
+            logger.exception(f"Error loading LoRAs with kohya_ss LoRAReady loader: {e}")

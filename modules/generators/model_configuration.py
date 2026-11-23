@@ -418,7 +418,7 @@ if __name__ == "__main__":
         model_name="test-model",
         lora_names=["lora1", "lora2", "lora3"],
         lora_weights=[0.5, 0.5, 0.5],
-        lora_loader=LoraLoader.DIFFUSERS,
+        lora_loader=LoraLoader.LORA_READY,
     )
     logger.info(f"Model Name: {config.model_name}")
     logger.info(f"LoRA Settings: {config.settings.lora_settings}")

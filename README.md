@@ -175,7 +175,7 @@ Settings live in `.framepack/settings.json` and are written by the Settings tab,
 | `gradio_temp_dir` | `./temp` | Exported as `GRADIO_TEMP_DIR`. |
 | `input_files_dir` | `./input_files` | |
 | `gpu_memory_preservation` | `6` | GB of VRAM to keep free. |
-| `lora_loader` | `lora_ready` | `lora_ready` (kohya-ss loader) or `diffusers`. |
+| `lora_loader` | `lora_ready` | Kohya-ss LoRA Ready loader. Other values are ignored. |
 | `quantization_format` | `brain_floating_point_16bit` | Also accepts `integer_8bit` or `normal_float_4bit`. Quantization requires `bitsandbytes`; without it the app logs an error and runs unquantized. |
 | `reuse_model_instance` | `false` | Keep the transformer loaded between jobs. |
 | `startup_model_type` | `"None"` | Preload a model at startup. |

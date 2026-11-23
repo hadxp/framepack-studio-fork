@@ -46,7 +46,6 @@ class QuantizationFormat(StrEnum):
 
 
 class LoraLoader(StrEnum):
-    DIFFUSERS = "diffusers"
     LORA_READY = "lora_ready"
     DEFAULT = LORA_READY
 
@@ -71,7 +70,6 @@ class LoraLoader(StrEnum):
 if __name__ == "__main__":
     logger = logging.getLogger(__name__)
     # Test the StrEnum functionality
-    logger.info("diffusers:", LoraLoader.DIFFUSERS)  # Should print "diffusers"
     logger.info("lora_ready:", LoraLoader.LORA_READY)  # Should print "lora_ready"
     logger.info("default:", LoraLoader.DEFAULT)  # Should print "lora_ready"
     logger.info("supported_values:", LoraLoader.supported_values())
@@ -80,9 +78,7 @@ if __name__ == "__main__":
     except ValueError as e:
         logger.exception("pass:", e)  # Prints: Invalid LoraLoader value: invalid
     try:
-        logger.info(
-            "pass:", LoraLoader("diffusers")
-        )  # Should return LoraLoader.DIFFUSERS
+        logger.info("pass:", LoraLoader("lora_ready"))
     except ValueError as e:
         logger.exception("fail:", e)
     try:
@@ -93,14 +89,8 @@ if __name__ == "__main__":
         logger.exception("fail:", e)
 
     assert isinstance(LoraLoader("lora_ready"), StrEnum)
-    assert isinstance(LoraLoader.DIFFUSERS, LoraLoader), (
-        "DIFFUSERS should be an instance of LoraLoader"
-    )
-    assert LoraLoader.DEFAULT == LoraLoader.DIFFUSERS, (
-        "Default loader should be DIFFUSERS"
-    )
-    assert LoraLoader.DIFFUSERS != LoraLoader.LORA_READY, (
-        "DIFFUSERS should not equal LORA_READY"
+    assert LoraLoader.DEFAULT == LoraLoader.LORA_READY, (
+        "Default loader should be LORA_READY"
     )
 
     assert LoraLoader.LORA_READY.value == "lora_ready", (

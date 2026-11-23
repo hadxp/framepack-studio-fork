@@ -9,7 +9,7 @@ and theme under their component names, so those settings never applied).
 import gradio as gr
 
 from modules.ui import presets
-from shared import LoraLoader, QuantizationFormat
+from shared import QuantizationFormat
 
 BUILT_IN_THEMES = [
     "default",
@@ -166,12 +166,6 @@ def create_settings_ui(settings):
                         "scripts/convert_bf16_to_nvfp4.py. It cuts VRAM by 17 GB but "
                         "increases inference time by 0.4 seconds per step.",
                     )
-                    lora_loader = gr.Dropdown(
-                        label="LoRA loader",
-                        choices=[loader.value for loader in LoraLoader],
-                        value=settings.lora_loader.value,
-                        info="diffusers for Diffusers-format LoRAs, lora_ready for Kohya-ss.",
-                    )
                 with gr.Accordion("Text encoder system prompt", open=False):
                     override_system_prompt = gr.Checkbox(
                         label="Use my own system prompt",
@@ -204,7 +198,6 @@ def create_settings_ui(settings):
         "quantization_format": quantization_format,
         "vram_mode": vram_mode_setting,
         "offload_engine": offload_engine,
-        "lora_loader": lora_loader,
         "override_system_prompt": override_system_prompt,
         "system_prompt_template": system_prompt_template,
     }

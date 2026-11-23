@@ -15,7 +15,6 @@ from diffusers_helper.utils import (
     resize_and_center_crop,
 )
 from diffusers_helper.memory import (
-    cpu,
     gpu,
     move_model_to_device_with_memory_preservation,
     offload_model_from_device_for_memory_preservation,
@@ -1657,7 +1656,6 @@ def worker(
                     # Already there, unless an error moved it off
                     studio_module.current_generator.transformer.to(gpu)
                 elif streamer is not None:
-                    # LoRA adapters are part of the blocks it moves
                     streamer.prepare(reserve_gb=settings.get("gpu_memory_preservation"))
                 else:
                     move_model_to_device_with_memory_preservation(
@@ -1670,8 +1668,6 @@ def worker(
                     and studio_module.current_generator.should_memory_quantize_bf16()
                 ):
                     studio_module.current_generator.transformer.apply_nvfp4_w4a16()
-                if selected_loras and streamer is None:
-                    studio_module.current_generator.move_lora_adapters_to_device(gpu)
             else:
                 move_model_to_device_with_memory_preservation(
                     studio_module.current_generator.transformer,
@@ -1680,8 +1676,6 @@ def worker(
                 )
                 if studio_module.current_generator.should_memory_quantize_bf16():
                     studio_module.current_generator.transformer.apply_nvfp4_w4a16()
-                if selected_loras:
-                    studio_module.current_generator.move_lora_adapters_to_device(gpu)
 
             from diffusers_helper.pipelines.k_diffusion_hunyuan import sample_hunyuan
 
@@ -1801,10 +1795,6 @@ def worker(
                 if studio_module.current_generator.block_streamer is not None:
                     studio_module.current_generator.block_streamer.release()
                 elif not vram_mode.transformer_stays_on_gpu():
-                    if selected_loras:
-                        studio_module.current_generator.move_lora_adapters_to_device(
-                            cpu
-                        )
                     offload_model_from_device_for_memory_preservation(
                         studio_module.current_generator.transformer,
                         target_device=gpu,
@@ -2189,9 +2179,5 @@ def worker(
                     f"Error creating combined video ({job_id}_combined.mp4): {e}"
                 )
                 logger.error(traceback.format_exc())
-    # Final verification of LoRA state
-    if studio_module.current_generator and studio_module.current_generator.transformer:
-        studio_module.current_generator.verify_lora_state()
-
     stream_to_use.output_queue.push(("end", None))
     return

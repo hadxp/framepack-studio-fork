@@ -47,7 +47,7 @@ class Settings:
 User prompt: "{text_to_enhance}"
 
 Enhanced prompt:""",
-            "lora_loader": LoraLoader.DEFAULT,  # lora_loader options: diffusers, lora_ready. DEFAULT is existing behavior of diffusers
+            "lora_loader": LoraLoader.DEFAULT,  # Kohya LoRA Ready. Other loaders are ignored.
             "reuse_model_instance": False,  # Reuse model instance across generations - default of False is existing behavior
             "quantization_format": QuantizationFormat.DEFAULT,  # Default quantization format
             "vram_mode": "auto",  # auto, high, medium or low; see modules/vram_mode.py
