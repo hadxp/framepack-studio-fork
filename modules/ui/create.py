@@ -5,10 +5,10 @@ Layout: the left column is the job (model and source, inputs, prompt, shot,
 timeline, motion, LoRAs, quality); the right column is a sticky rail with the
 live preview, checks, the queue button and what's up next.
 
-Which controls are usable comes from modules.ui.capabilities, so a feature
-the chosen model can't use is disabled with a reason instead of being
-silently dropped by the worker. The timeline and the Motion section are
-hidden when the model is F1, and shown when it is Original.
+Which controls are usable comes from modules.ui.capabilities. A control the
+chosen model and source cannot use is hidden. The timeline is Original-only.
+The end frame and keyframes follow that rule. A reference video stays
+available when F1 starts from an image.
 """
 
 import json
@@ -87,9 +87,16 @@ def _bucket_text(img, width, height):
     return f"Output size **{bucket_w} × {bucket_h}**"
 
 
-def _show_motion_and_timeline(model):
-    """Original uses the timeline and Motion. F1 does not."""
+def _show_for_original(model):
+    """The timeline is Original-only. F1 hides it."""
     return model == "Original"
+
+
+_PROMPT_INFO = (
+    "Change the prompt over time with [2s: …] — the timeline "
+    "below shows where each part lands."
+)
+_PROMPT_INFO_NO_TIMELINE = "Change the prompt over time with [2s: …]."
 
 
 def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
@@ -99,7 +106,12 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
         startup = settings.get("startup_model_type", "None")
     if startup and startup != "None":
         initial_model, initial_source = caps.from_legacy(startup)
-    show_motion = _show_motion_and_timeline(initial_model)
+    show_timeline = _show_for_original(initial_model)
+    show_end = caps.supports("end_frame", initial_model, initial_source)
+    show_keyframes = caps.supports("keyframes", initial_model, initial_source)
+    show_reference = caps.supports("motion_reference", initial_model, initial_source)
+    show_motion = show_keyframes or show_reference
+    start_from_image = initial_source != "Video"
 
     # The timeline runs along the top of the Create tab, above both columns.
     # Hidden for F1; shown again when the model is Original.
@@ -107,7 +119,7 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
         label="Timeline",
         elem_id="create-timeline",
         interactive=True,
-        visible=show_motion,
+        visible=show_timeline,
     )
 
     with gr.Row(elem_id="create-root", equal_height=False):
@@ -150,7 +162,9 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
 
             # Inputs
             with gr.Row(equal_height=False, elem_classes="frames-row"):
-                with gr.Column(scale=1, min_width=220) as image_col:
+                with gr.Column(
+                    scale=1, min_width=220, visible=start_from_image
+                ) as image_col:
                     input_image = gr.Image(
                         sources="upload",
                         type="numpy",
@@ -166,7 +180,9 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                         label="Without a start frame, begin from",
                         visible=True,
                     )
-                with gr.Column(scale=1, min_width=220, visible=False) as video_col:
+                with gr.Column(
+                    scale=1, min_width=220, visible=not start_from_image
+                ) as video_col:
                     input_video = gr.Video(
                         sources="upload",
                         label="Video to extend",
@@ -186,7 +202,9 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                         info="More keeps the look of the source but uses more memory "
                         "and can restrict motion.",
                     )
-                with gr.Column(scale=1, min_width=220) as end_col:
+                with gr.Column(
+                    scale=1, min_width=220, visible=show_end
+                ) as end_col:
                     end_frame_image = gr.Image(
                         sources="upload",
                         type="numpy",
@@ -210,15 +228,19 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                 label="Prompt",
                 value=default_prompt,
                 lines=3,
-                info="Change the prompt over time with [2s: …] — the timeline "
-                "below shows where each part lands.",
+                info=_PROMPT_INFO if show_timeline else _PROMPT_INFO_NO_TIMELINE,
             )
             with gr.Row(elem_classes="prompt-tools"):
                 enhance_btn = gr.Button("Enhance prompt", size="sm", scale=0)
                 stop_enhance_btn = gr.Button(
                     "Stop enhancing", size="sm", variant="stop", scale=0, visible=False
                 )
-                caption_btn = gr.Button("Describe start frame", size="sm", scale=0)
+                caption_btn = gr.Button(
+                    "Describe start frame",
+                    size="sm",
+                    scale=0,
+                    visible=start_from_image,
+                )
                 stop_caption_btn = gr.Button(
                     "Stop describing", size="sm", variant="stop", scale=0, visible=False
                 )
@@ -261,12 +283,16 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                     _bucket_text(None, 640, 640), elem_classes="field-note right"
                 )
 
-            # Motion. Hidden for F1; shown again when the model is Original.
+            # Shown when keyframes or a reference video work for this setup.
+            # Camera & arrows stays hidden: warped noise breaks the real model.
             with gr.Column(
                 elem_classes="motion-group", visible=show_motion
             ) as motion_group:
                 gr.Markdown("### Motion", elem_classes="section-title")
-                with gr.Tabs(elem_id="motion-tabs", selected="keyframes"):
+                with gr.Tabs(
+                    elem_id="motion-tabs",
+                    selected="keyframes" if show_keyframes else "motion_reference",
+                ) as motion_tabs:
                     # Hidden: warped noise breaks the real model even at low
                     # strength (tested on HunyuanVideo FramePack). Needs a
                     # fine-tuned model.
@@ -300,7 +326,9 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                             info="Arrows and camera moves nudge the model rather than "
                             "force it. High values can freeze texture in place.",
                         )
-                    with gr.Tab("Keyframes", id="keyframes"):
+                    with gr.Tab(
+                        "Keyframes", id="keyframes", visible=show_keyframes
+                    ) as keyframes_tab:
                         keyframes_note = gr.Markdown("", elem_classes="field-note warn")
                         gr.Markdown(
                             "Images the video should pass through. Each one snaps to "
@@ -331,7 +359,11 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                                             step=0.1,
                                         )
                                     )
-                    with gr.Tab("Reference video", id="motion_reference"):
+                    with gr.Tab(
+                        "Reference video",
+                        id="motion_reference",
+                        visible=show_reference,
+                    ) as reference_tab:
                         reference_note = gr.Markdown("", elem_classes="field-note warn")
                         gr.Markdown(
                             "Follow the motion and layout of another clip. Where things "
@@ -511,7 +543,9 @@ def create_create_ui(lora_names, default_prompt, dummy_lora_name, settings):
                 "Cancel current job", variant="stop", visible=False, size="sm"
             )
             with gr.Accordion(
-                "Batch: one job per image", open=False, visible=True
+                "Batch: one job per image",
+                open=False,
+                visible=caps.supports("batch", initial_model, initial_source),
             ) as batch_accordion:
                 gr.Markdown(
                     "Every image gets the settings on the left as its start frame.",
@@ -654,10 +688,14 @@ def connect_create_events(g, f, settings, dummy_lora_name):
         }
         keyframes_ok = not notes["keyframes"]
         end_ok = not notes["end_frame"]
-        show_motion = _show_motion_and_timeline(model)
+        show_timeline = _show_for_original(model)
+        show_end = caps.supports("end_frame", model, source)
+        show_keyframes = caps.supports("keyframes", model, source)
+        show_reference = caps.supports("motion_reference", model, source)
         return [
             gr.update(visible=not is_video),  # image_col
             gr.update(visible=is_video),  # video_col
+            gr.update(visible=show_end),  # end_col
             gr.update(interactive=end_ok),  # end_frame_image
             gr.update(interactive=end_ok),  # end_frame_strength
             notes["end_frame"],  # end_frame_note
@@ -677,13 +715,22 @@ def connect_create_events(g, f, settings, dummy_lora_name):
                 choices=(names := presets.list_presets(model, source)),
                 value=preset if preset in names else None,
             ),
-            gr.update(visible=show_motion),  # timeline
-            gr.update(visible=show_motion),  # motion_group
+            gr.update(visible=show_timeline),  # timeline
+            gr.update(visible=show_keyframes or show_reference),  # motion_group
+            gr.update(visible=show_keyframes),  # keyframes_tab
+            gr.update(visible=show_reference),  # reference_tab
+            gr.update(
+                selected="keyframes" if show_keyframes else "motion_reference"
+            ),  # motion_tabs
+            gr.update(
+                info=_PROMPT_INFO if show_timeline else _PROMPT_INFO_NO_TIMELINE
+            ),  # prompt
         ]
 
     setup_outputs = [
         g["image_col"],
         g["video_col"],
+        g["end_col"],
         g["end_frame_image"],
         g["end_frame_strength"],
         g["end_frame_note"],
@@ -703,6 +750,10 @@ def connect_create_events(g, f, settings, dummy_lora_name):
         g["preset_dropdown"],
         g["timeline"],
         g["motion_group"],
+        g["keyframes_tab"],
+        g["reference_tab"],
+        g["motion_tabs"],
+        g["prompt"],
     ]
 
     # ---- timeline -----------------------------------------------------------
