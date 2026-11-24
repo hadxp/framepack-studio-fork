@@ -102,13 +102,25 @@ with sync_playwright() as p:
 
     # Capability gating
     radio(pg, "F1")
-    pg.get_by_role("tab", name="Keyframes", exact=True).click()
     time.sleep(0.8)
-    reason = pg.locator(".field-note.warn").filter(
-        has_text="Keyframes only works with Original"
+    check("F1 hides the timeline", not pg.locator("#create-timeline").is_visible())
+    check(
+        "F1 hides keyframes",
+        not pg.get_by_role("tab", name="Keyframes", exact=True).is_visible(),
     )
-    check("F1 explains why keyframes are off", reason.count() >= 1)
+    check(
+        "F1 keeps the reference video",
+        pg.get_by_role("tab", name="Reference video", exact=True).is_visible(),
+    )
+    check(
+        "F1 hides the end frame",
+        not pg.get_by_text("End frame · optional", exact=True).is_visible(),
+    )
     radio(pg, "Video")
+    check(
+        "F1 from a video hides Motion",
+        not pg.locator(".motion-group").is_visible(),
+    )
     check(
         "Video without a video blocks the queue",
         not add.is_enabled() and "Add a video" in visible_checks(pg),
@@ -116,6 +128,15 @@ with sync_playwright() as p:
     radio(pg, "Original")
     radio(pg, "Image")
     check("Original from an image can queue", add.is_enabled())
+    check("Original shows the timeline", pg.locator("#create-timeline").is_visible())
+    check(
+        "Original shows the end frame",
+        pg.get_by_text("End frame · optional", exact=True).is_visible(),
+    )
+    check(
+        "Original shows keyframes",
+        pg.get_by_role("tab", name="Keyframes", exact=True).is_visible(),
+    )
 
     # Start frame, arrow, keyframe
     block(pg, "Start frame · optional").locator("input[type=file]").set_input_files(

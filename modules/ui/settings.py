@@ -30,6 +30,14 @@ STARTUP_CHOICES = [
     ("F1, from a video", "Video F1"),
 ]
 
+# Shown in the menu. The saved value stays auto, high, medium or low.
+VRAM_MODE_CHOICES = [
+    ("Auto — picks from free VRAM", "auto"),
+    ("High — every model stays on the GPU (over 60 GB free)", "high"),
+    ("Medium — model stays on the GPU in fp8 (about 20 GB free)", "medium"),
+    ("Low — transformer stays in system RAM and loads for each section", "low"),
+]
+
 
 def create_settings_ui(settings):
     theme = settings.get("gradio_theme", "default")
@@ -144,7 +152,7 @@ def create_settings_ui(settings):
                     )
                     vram_mode_setting = gr.Dropdown(
                         label="VRAM mode (restart to apply)",
-                        choices=["auto", "high", "medium", "low"],
+                        choices=VRAM_MODE_CHOICES,
                         value=settings.get("vram_mode", "auto"),
                         info="Medium keeps the model on the GPU in fp8 (needs about "
                         "20 GB free) and is much faster than low. Auto picks from "
@@ -164,7 +172,9 @@ def create_settings_ui(settings):
                         info="Force the packed NVFP4 checkpoint even when the bfloat16 "
                         "weights fit in VRAM. Create it with "
                         "scripts/convert_bf16_to_nvfp4.py. It cuts VRAM by 17 GB but "
-                        "increases inference time by 0.4 seconds per step.",
+                        "increases inference time by 0.4 seconds per step. Medium and "
+                        "high keep those weights on the GPU. Low uses the legacy "
+                        "offload.",
                     )
                 with gr.Accordion("Text encoder system prompt", open=False):
                     override_system_prompt = gr.Checkbox(
