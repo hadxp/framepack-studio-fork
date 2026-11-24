@@ -177,10 +177,12 @@ class BaseModelGenerator(ABC):
         )
 
     def use_nvfp4_loader(self) -> bool:
-        """NVFP4 replaces the dev loader when forced, or when the packed file is required."""
+        """NVFP4 replaces the dev loader when forced, or when bfloat16 does not fit.
+
+        A missing packed file is created during that load.
+        """
         from diffusers_helper.nvfp4_checkpoint import (
             checkpoint_nbytes,
-            nvfp4_checkpoint_path,
             resolve_model_dir,
             should_use_nvfp4_checkpoint,
             usable_vram_bytes,
@@ -203,7 +205,6 @@ class BaseModelGenerator(ABC):
         return should_use_nvfp4_checkpoint(
             weight_bytes,
             usable_vram_bytes(preservation_gb),
-            nvfp4_checkpoint_path(model_dir).is_file(),
             force=False,
         )
 

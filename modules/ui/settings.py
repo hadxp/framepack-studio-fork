@@ -170,11 +170,11 @@ def create_settings_ui(settings):
                         label="NVFP4-W4A16",
                         value=bool(settings.get("nvfp4_w4a16", False)),
                         info="Force the packed NVFP4 checkpoint even when the bfloat16 "
-                        "weights fit in VRAM. Create it with "
-                        "scripts/convert_bf16_to_nvfp4.py. It cuts VRAM by 17 GB but "
-                        "increases inference time by 0.4 seconds per step. Medium and "
-                        "high keep those weights on the GPU. Low uses the legacy "
-                        "offload.",
+                        "weights fit in VRAM. A missing packed file is created from "
+                        "those weights when the model next loads. It cuts VRAM by "
+                        "17 GB but increases inference time by 0.4 seconds per step. "
+                        "Medium and high keep those weights on the GPU. Low uses the "
+                        "legacy offload.",
                     )
                 with gr.Accordion("Text encoder system prompt", open=False):
                     override_system_prompt = gr.Checkbox(

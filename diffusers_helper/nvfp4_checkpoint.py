@@ -175,12 +175,13 @@ def usable_vram_bytes(preservation_gb: float) -> int | None:
 def should_use_nvfp4_checkpoint(
     weight_bytes: int,
     usable_bytes: int | None,
-    nvfp4_exists: bool,
     force: bool = False,
 ) -> bool:
-    """Use the packed file when it is forced, or when bfloat16 exceeds usable VRAM."""
-    if not nvfp4_exists:
-        return False
+    """Use the packed file when it is forced, or when bfloat16 exceeds usable VRAM.
+
+    This does not look for the file. The loader creates a missing one before
+    reading it.
+    """
     if force:
         return True
     return usable_bytes is not None and weight_bytes > usable_bytes
@@ -438,14 +439,9 @@ def load_hunyuan_transformer(
 ):
     """Load the packed NVFP4 file when forced, or when bfloat16 exceeds usable VRAM.
 
+    A missing packed file is created from the bfloat16 weights, then loaded.
     A bfloat16 checkpoint that fits, with the checkbox off, stays bfloat16.
-    A missing packed file falls back to bfloat16, then quantizes only when the
-    checkbox is on or the checkpoint does not fit.
     """
-    from diffusers_helper.models.hunyuan_video_packed import (
-        HunyuanVideoTransformer3DModelPacked,
-    )
-
     model_dir = None
     weight_bytes = None
     usable = None
@@ -461,15 +457,16 @@ def load_hunyuan_transformer(
         try:
             weight_bytes = checkpoint_nbytes(model_dir)
         except Exception:
-            logger.exception(
-                "Could not measure the bfloat16 checkpoint. Loading it and quantizing."
-            )
+            logger.exception("Could not measure the bfloat16 checkpoint.")
             weight_bytes = None
         usable = usable_vram_bytes(preservation_gb)
-        nvfp4_exists = nvfp4_path.is_file()
-        if should_use_nvfp4_checkpoint(
-            weight_bytes or 0, usable, nvfp4_exists, force=force_nvfp4
-        ):
+        if should_use_nvfp4_checkpoint(weight_bytes or 0, usable, force=force_nvfp4):
+            if not nvfp4_path.is_file():
+                logger.info(
+                    "NVFP4 checkpoint is missing at %s. Creating it from the bfloat16 weights.",
+                    nvfp4_path,
+                )
+                nvfp4_path = convert_checkpoint(model_dir)
             if force_nvfp4:
                 logger.info("NVFP4-W4A16 is forced. Loading %s.", nvfp4_path)
             else:
@@ -480,33 +477,17 @@ def load_hunyuan_transformer(
                     nvfp4_path,
                 )
             return load_nvfp4_transformer(model_dir, nvfp4_path)
-        if force_nvfp4 and not nvfp4_exists:
-            logger.info(
-                "NVFP4-W4A16 is forced, but %s is missing. Loading bfloat16 and quantizing.",
-                nvfp4_path,
-            )
-        if (
-            weight_bytes is not None
-            and usable is not None
-            and weight_bytes > usable
-            and not nvfp4_exists
-            and not force_nvfp4
-        ):
-            logger.info(
-                "bfloat16 checkpoint is %.2f GB and usable VRAM is %.2f GB. "
-                "No NVFP4 file at %s. Loading bfloat16 and quantizing. "
-                "Create the packed file with scripts/convert_bf16_to_nvfp4.py.",
-                weight_bytes / (1024**3),
-                usable / (1024**3),
-                nvfp4_path,
-            )
-        elif bf16_fits_in_vram(weight_bytes, usable) and not force_nvfp4:
+        if bf16_fits_in_vram(weight_bytes, usable) and not force_nvfp4:
             logger.info(
                 "bfloat16 checkpoint is %.2f GB and fits in %.2f GB usable VRAM. "
                 "Leaving the weights in bfloat16.",
                 weight_bytes / (1024**3),
                 usable / (1024**3),
             )
+
+    from diffusers_helper.models.hunyuan_video_packed import (
+        HunyuanVideoTransformer3DModelPacked,
+    )
 
     source = str(model_dir) if model_dir is not None else path
     model = HunyuanVideoTransformer3DModelPacked.from_pretrained(

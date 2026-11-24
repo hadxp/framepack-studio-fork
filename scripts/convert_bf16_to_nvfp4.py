@@ -2,7 +2,8 @@
 
 The packed file is written next to the original weights as
 ``diffusion_pytorch_model-nvfp4.safetensors``. The bfloat16 files stay in place
-so a Kohya LoRA merge can still read them.
+so a Kohya LoRA merge can still read them. When the studio should load this
+file and it is missing, it runs the same conversion and then loads the result.
 
 Example:
     .\\.venv\\Scripts\\python.exe scripts\\convert_bf16_to_nvfp4.py PATH
