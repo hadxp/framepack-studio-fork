@@ -954,7 +954,7 @@ class HunyuanVideoPatchEmbedForCleanLatents(nn.Module):
         self.proj_2x = nn.Conv3d(16, inner_dim, kernel_size=(2, 4, 4), stride=(2, 4, 4))
         self.proj_4x = nn.Conv3d(16, inner_dim, kernel_size=(4, 8, 8), stride=(4, 8, 8))
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def initialize_weight_from_another_conv3d(self, another_layer):
         weight = another_layer.weight.detach().clone()
         bias = another_layer.bias.detach().clone()
@@ -1171,14 +1171,27 @@ class HunyuanVideoTransformer3DModelPacked(
             logger.info("Restored %s NVFP4 linear weights to bfloat16.", restored)
 
     def apply_nvfp4_w4a16(self) -> int:
-        """Store eligible Linear weights as NVFP4-W4A16.
+        """Store eligible Linear weights as NVFP4-A16."""
+        return self.apply_nvfp4("nvfp4a16")
+
+    def apply_nvfp4(self, variant: str = "nvfp4a16") -> int:
+        """Compress eligible Linear weights to the selected NVFP4 format.
 
         Call this after the module holds bfloat16 checkpoint weights (including a
-        merged LoRA state dict). torchao ``NVFP4WeightOnlyConfig`` quantizes
-        weights only. Activations and the matmul stay in bfloat16. Layers whose
-        dimensions are not divisible by 16 are left in bfloat16. Already
-        quantized weights are left unchanged.
+        merged LoRA state dict). ``nvfp4a16`` quantizes weights and leaves
+        activations in bfloat16. ``nvfp4`` uses those same packed weights and
+        also quantizes activations. Layers whose dimensions are not divisible
+        by 16 stay bfloat16. Already quantized weights are left unchanged.
         """
+        from diffusers_helper.nvfp4_checkpoint import (
+            NVFP4,
+            normalize_nvfp4_variant,
+            nvfp4_from_parts,
+            nvfp4_variant_label,
+        )
+
+        variant = normalize_nvfp4_variant(variant)
+        label = nvfp4_variant_label(variant)
         install_torchao_diffusers_compat()
         try:
             from torchao.prototype.mx_formats.inference_workflow import (
@@ -1187,7 +1200,7 @@ class HunyuanVideoTransformer3DModelPacked(
             from torchao.quantization import quantize_
         except ImportError as exc:
             raise ImportError(
-                "NVFP4-W4A16 requires torchao. Install it with: pip install 'torchao>=0.15.0'"
+                "NVFP4 requires torchao. Install it with: pip install 'torchao>=0.15.0'"
             ) from exc
 
         pending = []
@@ -1196,7 +1209,7 @@ class HunyuanVideoTransformer3DModelPacked(
                 pending.append(module)
 
         if not pending:
-            logger.debug("NVFP4-W4A16: no bfloat16 linear weights left to quantize.")
+            logger.debug("%s: no bfloat16 linear weights left to quantize.", label)
             return 0
 
         with torch.no_grad():
@@ -1209,8 +1222,9 @@ class HunyuanVideoTransformer3DModelPacked(
                     )
 
         logger.info(
-            "Quantizing %s linear layers to NVFP4-W4A16 (weights only, activations stay bfloat16).",
+            "Quantizing %s linear layers to %s.",
             len(pending),
+            label,
         )
         quantize_(
             self,
@@ -1220,16 +1234,29 @@ class HunyuanVideoTransformer3DModelPacked(
 
         quantized = 0
         for module in pending:
-            if _is_nvfp4_weight(module.weight):
-                quantized += 1
+            if not _is_nvfp4_weight(module.weight):
+                continue
+            if variant == NVFP4:
+                packed = module.weight
+                module.weight = nn.Parameter(
+                    nvfp4_from_parts(
+                        packed.qdata,
+                        packed.scale,
+                        packed.per_tensor_scale,
+                        variant=variant,
+                    ),
+                    requires_grad=False,
+                )
+            quantized += 1
         if quantized != len(pending):
             logger.warning(
-                "NVFP4-W4A16 quantized %s of %s eligible linear layers.",
+                "%s quantized %s of %s eligible linear layers.",
+                label,
                 quantized,
                 len(pending),
             )
         else:
-            logger.info("NVFP4-W4A16 applied to %s linear layers.", quantized)
+            logger.info("%s applied to %s linear layers.", label, quantized)
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

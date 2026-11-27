@@ -166,15 +166,30 @@ def create_settings_ui(settings):
                         "Streamed copies whole blocks ahead of time from pinned "
                         "memory; it needs bf16 or float8_storage.",
                     )
-                    nvfp4_w4a16 = gr.Checkbox(
-                        label="NVFP4-W4A16",
-                        value=bool(settings.get("nvfp4_w4a16", False)),
-                        info="Force the packed NVFP4 checkpoint even when the bfloat16 "
+                    gr.Markdown(
+                        "**NVFP4** is lower quality and the fastest. It quantizes "
+                        "weights and activations. (requires Blackwell GPU)\n\n"
+                        "**NVFP4-A16** is the highest quality and slower. It "
+                        "quantizes weights only and keeps activations in bfloat16. (requires Blackwell GPU)"
+                    )
+                    nvfp4_checked = bool(settings.get("nvfp4_w4a16", False))
+                    nvfp4_chkbox = gr.Checkbox(
+                        label="NVFP4",
+                        value=nvfp4_checked,
+                        info="Force the packed checkpoint even when the bfloat16 "
                         "weights fit in VRAM. A missing packed file is created from "
-                        "those weights when the model next loads. It cuts VRAM by "
-                        "17 GB but increases inference time by 0.4 seconds per step. "
-                        "Medium and high keep those weights on the GPU. Low uses the "
-                        "legacy offload.",
+                        "those weights when the model next loads. The same format is "
+                        "used when the weights do not fit, and after a LoRA merge. "
+                        "It cuts weight memory by about 17 GB. Medium and high keep "
+                        "those weights on the GPU. Low uses the legacy offload.",
+                    )
+                    nvfp4_variant = gr.Dropdown(
+                        label="NVFP4 format",
+                        choices=["nvfp4a16", "nvfp4"],
+                        value=settings.nvfp4_variant,
+                        visible=nvfp4_checked,
+                        info="nvfp4a16 is the default. The bfloat16 weights are "
+                        "compressed to the format selected here.",
                     )
                 with gr.Accordion("Text encoder system prompt", open=False):
                     override_system_prompt = gr.Checkbox(
@@ -204,7 +219,8 @@ def create_settings_ui(settings):
         "gradio_theme": gradio_theme,
         "gpu_memory_preservation": gpu_memory_preservation,
         "reuse_model_instance": reuse_model_instance,
-        "nvfp4_w4a16": nvfp4_w4a16,
+        "nvfp4_w4a16": nvfp4_chkbox,
+        "nvfp4_variant": nvfp4_variant,
         "quantization_format": quantization_format,
         "vram_mode": vram_mode_setting,
         "offload_engine": offload_engine,
@@ -245,6 +261,13 @@ def connect_settings_events(s, settings, tb_processor):
             outputs=[s["status"]],
             show_progress="hidden",
         )
+
+    s["controls"]["nvfp4_w4a16"].change(
+        fn=lambda checked: gr.update(visible=bool(checked)),
+        inputs=[s["controls"]["nvfp4_w4a16"]],
+        outputs=[s["controls"]["nvfp4_variant"]],
+        show_progress="hidden",
+    )
 
     s["controls"]["startup_model_type"].change(
         fn=lambda model_type: gr.update(

@@ -1,8 +1,11 @@
-﻿"""Save and load NVFP4-W4A16 copies of a bfloat16 Hunyuan checkpoint.
+﻿"""Save and load NVFP4 copies of a bfloat16 Hunyuan checkpoint.
 
-The packed file stores each eligible linear as qdata, an FP8 scale, and a
-per-tensor scale. Other tensors stay bfloat16. A Kohya LoRA merge still reads
-the original bfloat16 safetensors.
+Each variant has its own file next to the bfloat16 weights.
+``diffusion_pytorch_model-nvfp4.safetensors`` quantizes activations.
+``diffusion_pytorch_model-nvfp4a16.safetensors`` leaves activations in
+bfloat16. The packed tensors are qdata, an FP8 scale, and a per-tensor
+scale. Other tensors stay bfloat16. A Kohya LoRA merge still reads the
+original bfloat16 safetensors.
 """
 
 import json
@@ -16,8 +19,18 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
-FORMAT_ID = "framepack-nvfp4-w4a16-v1"
-NVFP4_FILENAME = "diffusion_pytorch_model-nvfp4.safetensors"
+NVFP4_A16 = "nvfp4a16"
+NVFP4 = "nvfp4"
+_FORMAT_IDS = {
+    NVFP4_A16: "framepack-nvfp4-w4a16-v1",
+    NVFP4: "framepack-nvfp4-v1",
+}
+_FILENAMES = {
+    NVFP4_A16: "diffusion_pytorch_model-nvfp4a16.safetensors",
+    NVFP4: "diffusion_pytorch_model-nvfp4.safetensors",
+}
+# Older builds wrote NVFP4-A16 to the NVFP4 filename.
+_LEGACY_A16_FILENAME = "diffusion_pytorch_model-nvfp4.safetensors"
 _TRANSFORMER_CACHE_REPOS = (
     "models--lllyasviel--FramePackI2V_HY",
     "models--lllyasviel--FramePack_F1_I2V_HY_20250503",
@@ -28,8 +41,31 @@ _SCALE = "::scale"
 _PER_TENSOR_SCALE = "::per_tensor_scale"
 
 
-def nvfp4_checkpoint_path(model_dir: Path) -> Path:
-    return Path(model_dir) / NVFP4_FILENAME
+def nvfp4_checkpoint_path(model_dir: Path, variant: str = NVFP4_A16) -> Path:
+    """Path of the packed file for ``variant`` inside ``model_dir``."""
+    variant = normalize_nvfp4_variant(variant)
+    return Path(model_dir) / _FILENAMES[variant]
+
+
+def is_packed_nvfp4_filename(name: str) -> bool:
+    """True for a packed NVFP4 or NVFP4-A16 safetensors name."""
+    lower = name.lower()
+    return lower.endswith("-nvfp4.safetensors") or lower.endswith(
+        "-nvfp4a16.safetensors"
+    )
+
+
+def normalize_nvfp4_variant(value: str | None) -> str:
+    """``nvfp4`` quantizes activations. Anything else stays NVFP4-A16."""
+    if str(value or "").strip().lower() == NVFP4:
+        return NVFP4
+    return NVFP4_A16
+
+
+def nvfp4_variant_label(value: str | None) -> str:
+    if normalize_nvfp4_variant(value) == NVFP4:
+        return "NVFP4"
+    return "NVFP4-A16"
 
 
 def huggingface_cache_roots() -> list[Path]:
@@ -128,7 +164,7 @@ def original_weight_files(model_dir: Path) -> list[Path]:
         files = []
         for name in sorted(set(payload["weight_map"].values())):
             path = model_dir / name
-            if path.name.endswith("-nvfp4.safetensors"):
+            if is_packed_nvfp4_filename(path.name):
                 continue
             if not path.is_file():
                 raise FileNotFoundError(f"Missing checkpoint shard {path}")
@@ -145,7 +181,7 @@ def original_weight_files(model_dir: Path) -> list[Path]:
     files = sorted(
         path
         for path in model_dir.glob("*.safetensors")
-        if not path.name.endswith("-nvfp4.safetensors")
+        if not is_packed_nvfp4_filename(path.name)
     )
     if not files:
         raise FileNotFoundError(f"No safetensors weights in {model_dir}")
@@ -230,22 +266,115 @@ def linear_weight_keys(model_dir: Path) -> set[str]:
     return keys
 
 
-def convert_checkpoint(model_dir: Path, force: bool = False) -> Path:
-    """Write ``diffusion_pytorch_model-nvfp4.safetensors`` beside the bfloat16 weights."""
-    model_dir = Path(model_dir)
-    destination = nvfp4_checkpoint_path(model_dir)
-    if destination.is_file() and not force:
-        logger.info("NVFP4 checkpoint already exists: %s", destination)
-        return destination
+def _read_format_id(path: Path) -> str | None:
+    """Safetensors format metadata, or None when the file has none."""
+    if not path.is_file():
+        return None
+    try:
+        from safetensors import safe_open
 
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            metadata = handle.metadata() or {}
+    except Exception:
+        return None
+    return metadata.get("format")
+
+
+def _accepted_formats(variant: str) -> set[str]:
+    return {_FORMAT_IDS[normalize_nvfp4_variant(variant)]}
+
+
+def find_nvfp4_checkpoint(model_dir: Path, variant: str = NVFP4_A16) -> Path | None:
+    """The packed file for ``variant``, including the older A16 filename."""
+    variant = normalize_nvfp4_variant(variant)
+    direct = nvfp4_checkpoint_path(model_dir, variant)
+    found = _usable_checkpoint(direct, variant)
+    if found is not None:
+        return found
+    if variant != NVFP4_A16:
+        return None
+    legacy = Path(model_dir) / _LEGACY_A16_FILENAME
+    if legacy == direct:
+        return None
+    return _usable_checkpoint(legacy, NVFP4_A16)
+
+
+def _usable_checkpoint(path: Path, variant: str) -> Path | None:
+    if not path.is_file():
+        return None
+    format_id = _read_format_id(path)
+    if format_id is None or format_id in _accepted_formats(variant):
+        return path
+    return None
+
+
+def _move_legacy_a16_aside(model_dir: Path) -> None:
+    """Keep an older A16 file when the NVFP4 filename is about to be reused."""
+    legacy = Path(model_dir) / _LEGACY_A16_FILENAME
+    if _read_format_id(legacy) != _FORMAT_IDS[NVFP4_A16]:
+        return
+    target = nvfp4_checkpoint_path(model_dir, NVFP4_A16)
+    if target.is_file():
+        return
+    legacy.replace(target)
+    logger.info("Moved the existing NVFP4-A16 checkpoint to %s.", target)
+
+
+def _variant_for_filename(name: str) -> str | None:
+    for variant, filename in _FILENAMES.items():
+        if name == filename:
+            return variant
+    return None
+
+
+def _save_packed_file(tensors: dict[str, torch.Tensor], destination: Path, format_id: str) -> None:
+    from safetensors.torch import save_file
+
+    destination = Path(destination)
+    temporary = destination.with_suffix(destination.suffix + ".partial")
+    save_file(
+        tensors,
+        str(temporary),
+        metadata={
+            "format": format_id,
+            "block_size": str(_BLOCK_SIZE),
+            "orig_dtype": "bfloat16",
+            "is_swizzled_scales": "true",
+            "use_dynamic_per_tensor_scale": "true",
+        },
+    )
+    temporary.replace(destination)
+
+
+def convert_checkpoint(
+    model_dir: Path, force: bool = False, variant: str = NVFP4_A16
+) -> Path:
+    """Write the packed file for ``variant`` beside the bfloat16 weights."""
+    model_dir = Path(model_dir)
+    variant = normalize_nvfp4_variant(variant)
+    if variant == NVFP4:
+        _move_legacy_a16_aside(model_dir)
+    existing = find_nvfp4_checkpoint(model_dir, variant)
+    if existing is not None and not force:
+        logger.info(
+            "%s checkpoint already exists: %s",
+            nvfp4_variant_label(variant),
+            existing,
+        )
+        return existing
+
+    destination = nvfp4_checkpoint_path(model_dir, variant)
     sources = original_weight_files(model_dir)
     keys = linear_weight_keys(model_dir)
     logger.info(
-        "Converting %s bfloat16 file(s) to NVFP4-W4A16. %s linear weights are eligible.",
+        "Converting %s bfloat16 file(s) to %s. %s linear weights are eligible.",
         len(sources),
+        nvfp4_variant_label(variant),
         len(keys),
     )
-    stats = convert_weight_files(sources, destination, keys)
+    stats = convert_weight_files(
+        sources, destination, keys, format_id=_FORMAT_IDS[variant]
+    )
     logger.info(
         "Wrote %s (%s packed linears, %s bfloat16 tensors).",
         destination,
@@ -255,12 +384,75 @@ def convert_checkpoint(model_dir: Path, force: bool = False) -> Path:
     return destination
 
 
-def convert_weight_files(
-    sources: list[Path], destination: Path, linear_keys: set[str]
-) -> dict[str, int]:
-    """Pack eligible weights from ``sources`` into one NVFP4 safetensors file."""
-    from safetensors.torch import save_file
+def convert_variants(
+    model_dir: Path, variants: list[str], force: bool = False
+) -> list[Path]:
+    """Write one packed file per variant. One quantization pass fills every missing file."""
+    model_dir = Path(model_dir)
+    selected = []
+    for variant in variants:
+        normalized = normalize_nvfp4_variant(variant)
+        if normalized not in selected:
+            selected.append(normalized)
+    if NVFP4 in selected:
+        _move_legacy_a16_aside(model_dir)
+    ready: list[Path] = []
+    pending: list[str] = []
+    for variant in selected:
+        existing = find_nvfp4_checkpoint(model_dir, variant)
+        if existing is not None and not force:
+            logger.info(
+                "%s checkpoint already exists: %s",
+                nvfp4_variant_label(variant),
+                existing,
+            )
+            ready.append(existing)
+        else:
+            pending.append(variant)
+    if len(pending) == 1:
+        ready.append(convert_checkpoint(model_dir, force=True, variant=pending[0]))
+    elif len(pending) > 1:
+        sources = original_weight_files(model_dir)
+        keys = linear_weight_keys(model_dir)
+        logger.info(
+            "Converting %s bfloat16 file(s) to %s. %s linear weights are eligible.",
+            len(sources),
+            " and ".join(nvfp4_variant_label(variant) for variant in pending),
+            len(keys),
+        )
+        copies = [
+            (nvfp4_checkpoint_path(model_dir, variant), _FORMAT_IDS[variant])
+            for variant in pending
+        ]
+        stats = convert_weight_files(
+            sources,
+            copies[0][0],
+            keys,
+            format_id=copies[0][1],
+            copies=copies[1:],
+        )
+        logger.info(
+            "Wrote %s packed linears and %s bfloat16 tensors into %s file(s).",
+            stats["packed"],
+            stats["plain"],
+            len(copies),
+        )
+        ready.extend(path for path, _format_id in copies)
+    order = {variant: index for index, variant in enumerate(selected)}
+    ready.sort(
+        key=lambda path: order.get(_variant_for_filename(path.name), len(selected))
+    )
+    return ready
 
+
+def convert_weight_files(
+    sources: list[Path],
+    destination: Path,
+    linear_keys: set[str],
+    format_id: str = _FORMAT_IDS[NVFP4_A16],
+    copies: list[tuple[Path, str]] | None = None,
+) -> dict[str, int]:
+    """Pack eligible weights from ``sources`` into one or more NVFP4 safetensors files."""
     tensors: dict[str, torch.Tensor] = {}
     packed = 0
     plain = 0
@@ -296,20 +488,9 @@ def convert_weight_files(
             f"Checkpoint is missing {len(missing)} linear weights, including {missing[:8]}"
         )
 
-    destination = Path(destination)
-    temporary = destination.with_suffix(destination.suffix + ".partial")
-    save_file(
-        tensors,
-        str(temporary),
-        metadata={
-            "format": FORMAT_ID,
-            "block_size": str(_BLOCK_SIZE),
-            "orig_dtype": "bfloat16",
-            "is_swizzled_scales": "true",
-            "use_dynamic_per_tensor_scale": "true",
-        },
-    )
-    temporary.replace(destination)
+    _save_packed_file(tensors, destination, format_id)
+    for copy_path, copy_format in copies or []:
+        _save_packed_file(tensors, copy_path, copy_format)
     return {"packed": packed, "plain": plain}
 
 
@@ -342,10 +523,27 @@ def pack_bf16_weight(
     return qdata, scale, per_tensor_scale
 
 
+def nvfp4_activation_kwargs(variant: str):
+    """Activation quantization for NVFP4. NVFP4-A16 leaves activations in bfloat16."""
+    if normalize_nvfp4_variant(variant) != NVFP4:
+        return None
+    from torchao.prototype.mx_formats.nvfp4_tensor import QuantizeTensorToNVFP4Kwargs
+
+    return QuantizeTensorToNVFP4Kwargs(
+        block_size=_BLOCK_SIZE,
+        is_swizzled_scales=True,
+        use_triton_kernel=False,
+        use_dynamic_per_tensor_scale=True,
+    )
+
+
 def nvfp4_from_parts(
-    qdata: torch.Tensor, scale: torch.Tensor, per_tensor_scale: torch.Tensor
+    qdata: torch.Tensor,
+    scale: torch.Tensor,
+    per_tensor_scale: torch.Tensor,
+    variant: str = NVFP4_A16,
 ):
-    """Rebuild the weight-only NVFP4 tensor stored by ``pack_bf16_weight``."""
+    """Rebuild the NVFP4 tensor stored by ``pack_bf16_weight``."""
     from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
 
     if per_tensor_scale.ndim != 0:
@@ -358,20 +556,24 @@ def nvfp4_from_parts(
         per_tensor_scale=per_tensor_scale,
         is_swizzled_scales=True,
         use_triton_kernel=False,
-        act_quant_kwargs=None,
+        act_quant_kwargs=nvfp4_activation_kwargs(variant),
     )
 
 
-def load_nvfp4_weights(model: nn.Module, path: Path) -> int:
+def load_nvfp4_weights(
+    model: nn.Module, path: Path, variant: str = NVFP4_A16
+) -> int:
     """Replace module parameters with tensors from an NVFP4 safetensors file."""
     from safetensors import safe_open
 
     path = Path(path)
     with safe_open(path, framework="pt", device="cpu") as handle:
         metadata = handle.metadata() or {}
-        if metadata.get("format") != FORMAT_ID:
+        format_id = metadata.get("format")
+        if format_id not in _accepted_formats(variant):
             raise RuntimeError(
-                f"{path} is not a {FORMAT_ID} checkpoint (found {metadata.get('format')!r})."
+                f"{path} is not a {nvfp4_variant_label(variant)} checkpoint "
+                f"(found {format_id!r})."
             )
         grouped: dict[str, dict[str, str]] = {}
         plain_keys = []
@@ -391,6 +593,7 @@ def load_nvfp4_weights(model: nn.Module, path: Path) -> int:
                 handle.get_tensor(parts["qdata"]),
                 handle.get_tensor(parts["scale"]),
                 handle.get_tensor(parts["per_tensor_scale"]),
+                variant=variant,
             )
             _assign_tensor(model, base, weight)
             packed += 1
@@ -418,7 +621,9 @@ def load_nvfp4_weights(model: nn.Module, path: Path) -> int:
     return packed
 
 
-def load_nvfp4_transformer(model_dir: Path, nvfp4_path: Path):
+def load_nvfp4_transformer(
+    model_dir: Path, nvfp4_path: Path, variant: str = NVFP4_A16
+):
     """Build the Hunyuan transformer on the meta device and fill it from ``nvfp4_path``."""
     from diffusers_helper.models.hunyuan_video_packed import (
         HunyuanVideoTransformer3DModelPacked,
@@ -427,21 +632,34 @@ def load_nvfp4_transformer(model_dir: Path, nvfp4_path: Path):
     config = HunyuanVideoTransformer3DModelPacked.load_config(str(model_dir))
     with torch.device("meta"):
         model = HunyuanVideoTransformer3DModelPacked.from_config(config)
-    packed = load_nvfp4_weights(model, nvfp4_path)
+    variant = normalize_nvfp4_variant(variant)
+    packed = load_nvfp4_weights(model, nvfp4_path, variant=variant)
     model.eval()
     model.requires_grad_(False)
-    logger.info("Loaded %s NVFP4 linear weights from %s.", packed, nvfp4_path)
+    logger.info(
+        "Loaded %s %s linear weights from %s.",
+        packed,
+        nvfp4_variant_label(variant),
+        nvfp4_path,
+    )
     return model
 
 
 def load_hunyuan_transformer(
-    path: str, *, preservation_gb: float, offline: bool, force_nvfp4: bool = False
+    path: str,
+    *,
+    preservation_gb: float,
+    offline: bool,
+    force_nvfp4: bool = False,
+    variant: str = NVFP4_A16,
 ):
     """Load the packed NVFP4 file when forced, or when bfloat16 exceeds usable VRAM.
 
     A missing packed file is created from the bfloat16 weights, then loaded.
-    A bfloat16 checkpoint that fits, with the checkbox off, stays bfloat16.
+    ``variant`` chooses NVFP4 or NVFP4-A16. A bfloat16 checkpoint that fits,
+    with the checkbox off, stays bfloat16.
     """
+    variant = normalize_nvfp4_variant(variant)
     model_dir = None
     weight_bytes = None
     usable = None
@@ -453,7 +671,7 @@ def load_hunyuan_transformer(
         )
 
     if model_dir is not None:
-        nvfp4_path = nvfp4_checkpoint_path(model_dir)
+        nvfp4_path = find_nvfp4_checkpoint(model_dir, variant)
         try:
             weight_bytes = checkpoint_nbytes(model_dir)
         except Exception:
@@ -461,14 +679,19 @@ def load_hunyuan_transformer(
             weight_bytes = None
         usable = usable_vram_bytes(preservation_gb)
         if should_use_nvfp4_checkpoint(weight_bytes or 0, usable, force=force_nvfp4):
-            if not nvfp4_path.is_file():
+            if nvfp4_path is None:
                 logger.info(
-                    "NVFP4 checkpoint is missing at %s. Creating it from the bfloat16 weights.",
+                    "%s checkpoint is missing. Creating it from the bfloat16 weights at %s.",
+                    nvfp4_variant_label(variant),
+                    nvfp4_checkpoint_path(model_dir, variant),
+                )
+                nvfp4_path = convert_checkpoint(model_dir, variant=variant)
+            if force_nvfp4:
+                logger.info(
+                    "%s is forced. Loading %s.",
+                    nvfp4_variant_label(variant),
                     nvfp4_path,
                 )
-                nvfp4_path = convert_checkpoint(model_dir)
-            if force_nvfp4:
-                logger.info("NVFP4-W4A16 is forced. Loading %s.", nvfp4_path)
             else:
                 logger.info(
                     "bfloat16 checkpoint is %.2f GB and usable VRAM is %.2f GB. Loading %s.",
@@ -476,7 +699,7 @@ def load_hunyuan_transformer(
                     usable / (1024**3),
                     nvfp4_path,
                 )
-            return load_nvfp4_transformer(model_dir, nvfp4_path)
+            return load_nvfp4_transformer(model_dir, nvfp4_path, variant=variant)
         if bf16_fits_in_vram(weight_bytes, usable) and not force_nvfp4:
             logger.info(
                 "bfloat16 checkpoint is %.2f GB and fits in %.2f GB usable VRAM. "
@@ -497,7 +720,7 @@ def load_hunyuan_transformer(
     model.eval()
     model.requires_grad_(False)
     if should_memory_quantize_bf16(force_nvfp4, weight_bytes, usable):
-        model.apply_nvfp4_w4a16()
+        model.apply_nvfp4(variant)
     return model
 
 

@@ -221,6 +221,7 @@ class BaseModelGenerator(ABC):
             preservation_gb=preservation_gb,
             offline=bool(self.offline),
             force_nvfp4=self.settings.nvfp4_w4a16,
+            variant=self.settings.nvfp4_variant,
         )
         self.should_memory_quantize_bf16(refresh=True)
         return model
@@ -284,6 +285,10 @@ class BaseModelGenerator(ABC):
         )
         self._memory_quantize_bf16 = decision
         return decision
+
+    def apply_selected_nvfp4(self) -> int:
+        """Compress the loaded bfloat16 weights to the NVFP4 format in settings."""
+        return self.transformer.apply_nvfp4(self.settings.nvfp4_variant)
 
     @abstractmethod
     def load_model(self) -> HunyuanVideoTransformer3DModelPacked:
@@ -502,6 +507,7 @@ class BaseModelGenerator(ABC):
             selected_lora_values,
             self.settings.lora_loader,
             nvfp4_w4a16=self.settings.nvfp4_w4a16,
+            nvfp4_variant=self.settings.nvfp4_variant,
         )
 
         active_model_hash = self.__compute_lora_state_hash(active_model_configuration)
@@ -543,10 +549,12 @@ class BaseModelGenerator(ABC):
             model_files = glob.glob(
                 os.path.join(subdir, "**", "*.safetensors"), recursive=True
             ) + glob.glob(os.path.join(subdir, "**", "*.pt"), recursive=True)
+            from diffusers_helper.nvfp4_checkpoint import is_packed_nvfp4_filename
+
             model_files = [
                 path
                 for path in model_files
-                if not os.path.basename(path).endswith("-nvfp4.safetensors")
+                if not is_packed_nvfp4_filename(os.path.basename(path))
             ]
             model_files.sort()
             return model_files
@@ -574,7 +582,8 @@ class BaseModelGenerator(ABC):
 
             if pack_after_lora and self.settings.get("fp8", False):
                 logger.info(
-                    "Skipping Kohya fp8 optimization. The merged state dict stays bfloat16, then NVFP4-W4A16 is applied when it does not fit."
+                    "Skipping Kohya fp8 optimization. The merged state dict stays bfloat16, then %s is applied when it does not fit.",
+                    self.settings.nvfp4_variant,
                 )
             state_dict = load_and_apply_lora(
                 model_files=model_files,
@@ -602,7 +611,8 @@ class BaseModelGenerator(ABC):
                 state_dict[key] = value
             if quantize_merged and torch.cuda.is_available():
                 logger.info(
-                    "Moved merged bfloat16 LoRA weights to CUDA before NVFP4-W4A16."
+                    "Moved merged bfloat16 LoRA weights to CUDA before %s.",
+                    self.settings.nvfp4_variant,
                 )
             logger.debug("Loading state dict into transformer...")
             # With fp8 storage, copy into the existing fp8 weights (cast,
@@ -650,7 +660,7 @@ class BaseModelGenerator(ABC):
                 logger.warning("Could not free state dictionary from memory.")
 
             if quantize_merged:
-                self.transformer.apply_nvfp4_w4a16()
+                self.apply_selected_nvfp4()
             elif pack_after_lora:
                 logger.info(
                     "bfloat16 weights fit in usable VRAM. Leaving the LoRA merge in bfloat16."

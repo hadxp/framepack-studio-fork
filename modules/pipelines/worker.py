@@ -922,7 +922,7 @@ def worker(
                 preserved_memory_gb=settings.get("gpu_memory_preservation"),
             )
 
-        # Activations stay bfloat16. NVFP4-W4A16 quantizes weights only.
+        # Prompt embeddings stay bfloat16. NVFP4 linears quantize their own inputs.
         activation_dtype = studio_module.current_generator.transformer.activation_dtype
         for prompt_key in encoded_prompts:
             llama_vec, llama_attention_mask, clip_l_pooler = encoded_prompts[prompt_key]
@@ -1084,10 +1084,17 @@ def worker(
             stream_to_use.output_queue.push(
                 (
                     "progress",
-                    (None, "", make_progress_bar_html(0, "Applying NVFP4-W4A16 ...")),
+                    (
+                        None,
+                        "",
+                        make_progress_bar_html(
+                            0,
+                            f"Applying {studio_module.current_generator.settings.nvfp4_variant} ...",
+                        ),
+                    ),
                 )
             )
-            studio_module.current_generator.transformer.apply_nvfp4_w4a16()
+            studio_module.current_generator.apply_selected_nvfp4()
 
         # --- Callback for progress ---
 
@@ -1667,7 +1674,7 @@ def worker(
                     streamer is None
                     and studio_module.current_generator.should_memory_quantize_bf16()
                 ):
-                    studio_module.current_generator.transformer.apply_nvfp4_w4a16()
+                    studio_module.current_generator.apply_selected_nvfp4()
             else:
                 move_model_to_device_with_memory_preservation(
                     studio_module.current_generator.transformer,
@@ -1675,7 +1682,7 @@ def worker(
                     preserved_memory_gb=settings.get("gpu_memory_preservation"),
                 )
                 if studio_module.current_generator.should_memory_quantize_bf16():
-                    studio_module.current_generator.transformer.apply_nvfp4_w4a16()
+                    studio_module.current_generator.apply_selected_nvfp4()
 
             from diffusers_helper.pipelines.k_diffusion_hunyuan import sample_hunyuan
 

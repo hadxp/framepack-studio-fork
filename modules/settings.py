@@ -52,7 +52,8 @@ Enhanced prompt:""",
             "quantization_format": QuantizationFormat.DEFAULT,  # Default quantization format
             "vram_mode": "auto",  # auto, high, medium or low; see modules/vram_mode.py
             "offload_engine": "legacy",  # low VRAM mode: legacy or streamed; see diffusers_helper/streaming.py
-            "nvfp4_w4a16": False,  # Force the packed NVFP4-W4A16 checkpoint
+            "nvfp4_w4a16": False,  # Force the packed NVFP4 checkpoint
+            "nvfp4_variant": "nvfp4a16",  # nvfp4a16 or nvfp4
         }
         self.settings = self.load_settings()
 
@@ -99,6 +100,14 @@ Enhanced prompt:""",
     @property
     def nvfp4_w4a16(self) -> bool:
         return bool(self.settings.get("nvfp4_w4a16", False))
+
+    @property
+    def nvfp4_variant(self) -> str:
+        """``nvfp4a16`` keeps activations in bfloat16. ``nvfp4`` quantizes them."""
+        value = str(self.settings.get("nvfp4_variant", "nvfp4a16") or "").strip().lower()
+        if value == "nvfp4":
+            return "nvfp4"
+        return "nvfp4a16"
 
     def load_settings(self) -> Dict[str, Any]:
         """Load settings from file or return defaults"""
